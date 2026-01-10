@@ -8,3 +8,5 @@ league.db
 
 # Local database
 *.db
+.streamlit/secrets.toml
+*.db
