@@ -19,7 +19,12 @@ BASE_DIR = Path(__file__).resolve().parent
 # IMPORTANT for going online:
 # - If DB_PATH is set (e.g. /var/data/league.db on Render disk), we use it.
 # - Otherwise we keep the local file next to app.py
-DB_PATH = os.environ.get("DB_PATH", str(BASE_DIR / "league.db"))
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "league.db"))
+
 
 LEAGUE_TZ = "Pacific/Auckland"
 st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
