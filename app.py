@@ -38,7 +38,8 @@ def status_badge(text: str, bg: str, fg: str = "white"):
             background:{bg};
             color:{fg};
             font-weight:700;
-            font-size:14px;">
+            font-size:14px;
+            ">
             {text}
         </div>
         """,
