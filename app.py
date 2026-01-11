@@ -11,6 +11,14 @@ from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 from streamlit_autorefresh import st_autorefresh
 
+import traceback
+import sys
+
+def log_exception(e: Exception):
+    print("=== APP EXCEPTION ===", file=sys.stderr)
+    print(traceback.format_exc(), file=sys.stderr)
+    print("=== END EXCEPTION ===", file=sys.stderr)
+
 # ============================================================
 # CONFIG
 # ============================================================
@@ -882,47 +890,57 @@ def maybe_handle_offer_response():
 # ============================================================
 # APP START
 # ============================================================
-init_db()
+try:
+    init_db()
 
-maybe_handle_offer_response()
-handle_admin_login_via_query_params()
-maybe_restore_admin_from_session_param()
+    maybe_handle_offer_response()
+    handle_admin_login_via_query_params()
+    maybe_restore_admin_from_session_param()
 
-st.title("Referee Allocator — MVP")
-st.caption(f"Database file: {DB_PATH}")
+    st.title("Referee Allocator — MVP")
+    st.caption(f"Database file: {DB_PATH}")
 
-if admin_count() == 0:
-    st.warning("Initial setup: No administrators exist yet.")
-    st.write("Enter your email to create the first admin account (one-time setup).")
-    first_email = st.text_input("Your admin email", key="first_admin_email")
-    if st.button("Create first admin", key="create_first_admin_btn"):
-        if not first_email.strip():
-            st.error("Please enter an email.")
-        else:
-            add_admin(first_email)
-            st.success("First admin created. Now request a login link below.")
-    st.markdown("---")
+    if admin_count() == 0:
+        st.warning("Initial setup: No administrators exist yet.")
+        st.write("Enter your email to create the first admin account (one-time setup).")
+        first_email = st.text_input("Your admin email", key="first_admin_email")
+        if st.button("Create first admin", key="create_first_admin_btn"):
+            if not first_email.strip():
+                st.error("Please enter an email.")
+            else:
+                add_admin(first_email)
+                st.success("First admin created. Now request a login link below.")
+        st.markdown("---")
 
-if not st.session_state.get("admin_email"):
-    st.subheader("Admin Login")
-    st.write("Enter your email to receive a one-time login link (15 minutes).")
-    email = st.text_input("Admin email", key="login_email")
-    if st.button("Send login link", key="send_login_link_btn"):
-        if not email.strip():
-            st.error("Please enter an email.")
-        elif not is_admin_email_allowed(email):
-            st.error("That email is not an authorised administrator.")
-        else:
-            try:
-                send_admin_login_email(email)
-                st.success("Login link sent. Check your email.")
-            except Exception as e:
-                st.error(str(e))
+    if not st.session_state.get("admin_email"):
+        st.subheader("Admin Login")
+        st.write("Enter your email to receive a one-time login link (15 minutes).")
+        email = st.text_input("Admin email", key="login_email")
+        if st.button("Send login link", key="send_login_link_btn"):
+            if not email.strip():
+                st.error("Please enter an email.")
+            elif not is_admin_email_allowed(email):
+                st.error("That email is not an authorised administrator.")
+            else:
+                try:
+                    send_admin_login_email(email)
+                    st.success("Login link sent. Check your email.")
+                except Exception as e:
+                    st.error(str(e))
+        st.stop()
+
+    admin_logout_button()
+
+    tabs = st.tabs(["Admin", "Import", "Blackouts", "Administrators"])
+
+    # (everything else you already have stays EXACTLY the same, just indented)
+
+except Exception as e:
+    log_exception(e)
+    st.error("The application encountered a fatal error.")
+    st.exception(e)
     st.stop()
 
-admin_logout_button()
-
-tabs = st.tabs(["Admin", "Import", "Blackouts", "Administrators"])
 
 # -----------------------------
 # Administrators tab
