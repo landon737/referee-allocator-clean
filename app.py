@@ -20,6 +20,8 @@ BASE_DIR = Path(__file__).resolve().parent
 # Production: set DB_PATH in Render Environment (recommended) to your persistent disk path.
 # Local: falls back to ./league.db next to app.py
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "league.db"))
+# Ensure the folder for the database exists (critical on Render)
+Path(DB_PATH).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
 LEAGUE_TZ = "Pacific/Auckland"
 st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
