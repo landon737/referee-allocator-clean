@@ -1,36 +1,58 @@
 import os
-import streamlit as st
-import pandas as pd
 import sqlite3
 import secrets
-from datetime import datetime, date, timedelta
-from dateutil import parser as dtparser
 import smtplib
+from pathlib import Path
+from datetime import datetime, date, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+from dateutil import parser as dtparser
 from streamlit_autorefresh import st_autorefresh
-
-import traceback
-import sys
-
-def log_exception(e: Exception):
-    print("=== APP EXCEPTION ===", file=sys.stderr)
-    print(traceback.format_exc(), file=sys.stderr)
-    print("=== END EXCEPTION ===", file=sys.stderr)
 
 # ============================================================
 # CONFIG
 # ============================================================
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "league.db"))
-LEAGUE_TZ = "Pacific/Auckland"
 
+# Production: set DB_PATH in Render Environment (recommended) to your persistent disk path.
+# Local: falls back to ./league.db next to app.py
+DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "league.db"))
+
+LEAGUE_TZ = "Pacific/Auckland"
 st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
+
+
+# ============================================================
+# UI helpers
+# ============================================================
+def status_badge(text: str, bg: str, fg: str = "white"):
+    st.markdown(
+        f"""
+        <div style="
+            display:inline-block;
+            padding:6px 10px;
+            border-radius:8px;
+            background:{bg};
+            color:{fg};
+            font-weight:700;
+            font-size:14px;">
+            {text}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 # ============================================================
 # DB
 # ============================================================
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -111,6 +133,7 @@ def init_db():
         """
     )
 
+    # Admin allowlist + magic links
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS admins (
@@ -152,27 +175,18 @@ def init_db():
     conn.close()
 
 
-def now_iso():
-    return datetime.utcnow().isoformat(timespec="seconds")
-
-
 # ============================================================
 # Email (SMTP)
 # ============================================================
-import os
-import streamlit as st
-
 def smtp_settings():
-    # Streamlit secrets (local) + Render env vars (production)
-    s = {}
+    # Env vars (Render) take priority; secrets.toml (local) is fallback.
     try:
-        s = dict(st.secrets)  # works if secrets.toml exists
+        secrets_dict = dict(st.secrets)
     except Exception:
-        s = {}
+        secrets_dict = {}
 
     def get(key: str, default: str = "") -> str:
-        # Render env vars take priority; fall back to secrets.toml
-        return os.environ.get(key, str(s.get(key, default)))
+        return os.environ.get(key, str(secrets_dict.get(key, default)))
 
     return {
         "host": get("SMTP_HOST", ""),
@@ -181,7 +195,7 @@ def smtp_settings():
         "password": get("SMTP_PASSWORD", ""),
         "from_email": get("SMTP_FROM_EMAIL", get("SMTP_USER", "")),
         "from_name": get("SMTP_FROM_NAME", "Referee Allocator"),
-        "app_base_url": get("APP_BASE_URL", ""),  # e.g. https://your-app.onrender.com
+        "app_base_url": get("APP_BASE_URL", "").rstrip("/"),  # https://xxxx.onrender.com
     }
 
 
@@ -190,10 +204,8 @@ def send_html_email(to_email: str, to_name: str, subject: str, html_body: str):
     if not (cfg["host"] and cfg["user"] and cfg["password"] and cfg["from_email"] and cfg["app_base_url"]):
         raise RuntimeError(
             "Email not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, "
-            "SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL as Render Environment Variables "
-            "(or in .streamlit/secrets.toml for local dev)."
+            "SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL."
         )
-
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -257,7 +269,7 @@ def list_admins():
 
 def create_admin_login_token(email: str, minutes_valid: int = 15) -> str:
     token = secrets.token_urlsafe(32)
-    created = datetime.utcnow()
+    created = datetime.now(timezone.utc)
     expires = created + timedelta(minutes=minutes_valid)
 
     conn = db()
@@ -280,7 +292,7 @@ def create_admin_login_token(email: str, minutes_valid: int = 15) -> str:
 
 def create_admin_session(email: str, days_valid: int = 14) -> str:
     token = secrets.token_urlsafe(32)
-    created = datetime.utcnow()
+    created = datetime.now(timezone.utc)
     expires = created + timedelta(days=days_valid)
 
     conn = db()
@@ -321,7 +333,7 @@ def consume_admin_session(token: str) -> tuple[bool, str]:
         conn.close()
         return False, "Session revoked."
 
-    if datetime.utcnow() > dtparser.parse(row["expires_at"]):
+    if datetime.now(timezone.utc) > dtparser.parse(row["expires_at"]):
         conn.close()
         return False, "Session expired."
 
@@ -365,7 +377,7 @@ def consume_admin_token(token: str) -> tuple[bool, str]:
         return False, "This login link has already been used."
 
     expires_at = dtparser.parse(row["expires_at"])
-    if datetime.utcnow() > expires_at:
+    if datetime.now(timezone.utc) > expires_at:
         conn.close()
         return False, "This login link has expired. Please request a new one."
 
@@ -386,13 +398,6 @@ def send_admin_login_email(email: str):
     base = cfg.get("app_base_url", "").rstrip("/")
     token = create_admin_login_token(email)
     login_url = f"{base}/?admin_login=1&token={token}"
-
-    poc_reveal = os.getenv("POC_REVEAL_LOGIN_LINK", "").lower() in ("1", "true", "yes", "on")
-    if poc_reveal:
-        st.info("POC mode: admin login link shown below (email not sent)")
-        st.code(login_url)
-        return
-
 
     subject = "Admin login link"
     html = f"""
@@ -475,12 +480,6 @@ def import_referees_csv(df: pd.DataFrame):
 
 
 def replace_referees_csv(df: pd.DataFrame):
-    """
-    REPLACE mode:
-    - wipes referees + blackouts + offers
-    - resets ALL assignments to EMPTY (referee_id NULL)
-    - inserts ONLY referees from this CSV
-    """
     cols = {c.lower().strip(): c for c in df.columns}
     if "name" not in cols or "email" not in cols:
         raise ValueError("Referees CSV must contain columns: name, email")
@@ -502,15 +501,15 @@ def replace_referees_csv(df: pd.DataFrame):
     try:
         cur.execute("BEGIN")
         cur.execute("DELETE FROM offers")
+
         cur.execute(
             """
             UPDATE assignments
-            SET referee_id=NULL,
-                status='EMPTY',
-                updated_at=?
+            SET referee_id=NULL, status='EMPTY', updated_at=?
             """,
             (now_iso(),),
         )
+
         cur.execute("DELETE FROM blackouts")
         cur.execute("DELETE FROM referees")
 
@@ -526,7 +525,6 @@ def replace_referees_csv(df: pd.DataFrame):
 
         conn.commit()
         return len(new_refs)
-
     except Exception:
         conn.rollback()
         raise
@@ -890,61 +888,54 @@ def maybe_handle_offer_response():
 # ============================================================
 # APP START
 # ============================================================
-try:
-    init_db()
+init_db()
 
-    maybe_handle_offer_response()
-    handle_admin_login_via_query_params()
-    maybe_restore_admin_from_session_param()
+maybe_handle_offer_response()
+handle_admin_login_via_query_params()
+maybe_restore_admin_from_session_param()
 
-    st.title("Referee Allocator — MVP")
-    st.caption(f"Database file: {DB_PATH}")
+st.title("Referee Allocator — MVP")
+st.caption(f"Database file: {DB_PATH}")
 
-    if admin_count() == 0:
-        st.warning("Initial setup: No administrators exist yet.")
-        st.write("Enter your email to create the first admin account (one-time setup).")
-        first_email = st.text_input("Your admin email", key="first_admin_email")
-        if st.button("Create first admin", key="create_first_admin_btn"):
-            if not first_email.strip():
-                st.error("Please enter an email.")
-            else:
-                add_admin(first_email)
-                st.success("First admin created. Now request a login link below.")
-        st.markdown("---")
+# Bootstrap: create first admin if none exist
+if admin_count() == 0:
+    st.warning("Initial setup: No administrators exist yet.")
+    st.write("Enter your email to create the first admin account (one-time setup).")
+    first_email = st.text_input("Your admin email", key="first_admin_email")
+    if st.button("Create first admin", key="create_first_admin_btn"):
+        if not first_email.strip():
+            st.error("Please enter an email.")
+        else:
+            add_admin(first_email)
+            st.success("First admin created. Now request a login link below.")
+    st.markdown("---")
 
-    if not st.session_state.get("admin_email"):
-        st.subheader("Admin Login")
-        st.write("Enter your email to receive a one-time login link (15 minutes).")
-        email = st.text_input("Admin email", key="login_email")
-        if st.button("Send login link", key="send_login_link_btn"):
-            if not email.strip():
-                st.error("Please enter an email.")
-            elif not is_admin_email_allowed(email):
-                st.error("That email is not an authorised administrator.")
-            else:
-                try:
-                    send_admin_login_email(email)
-                    st.success("Login link sent. Check your email.")
-                except Exception as e:
-                    st.error(str(e))
-        st.stop()
-
-    admin_logout_button()
-
-    tabs = st.tabs(["Admin", "Import", "Blackouts", "Administrators"])
-
-    # (everything else you already have stays EXACTLY the same, just indented)
-
-except Exception as e:
-    log_exception(e)
-    st.error("The application encountered a fatal error.")
-    st.exception(e)
+# Login screen
+if not st.session_state.get("admin_email"):
+    st.subheader("Admin Login")
+    st.write("Enter your email to receive a one-time login link (15 minutes).")
+    email = st.text_input("Admin email", key="login_email")
+    if st.button("Send login link", key="send_login_link_btn"):
+        if not email.strip():
+            st.error("Please enter an email.")
+        elif not is_admin_email_allowed(email):
+            st.error("That email is not an authorised administrator.")
+        else:
+            try:
+                send_admin_login_email(email)
+                st.success("Login link sent. Check your email.")
+            except Exception as e:
+                st.error(str(e))
     st.stop()
 
+# Logged in view
+admin_logout_button()
 
-# -----------------------------
+tabs = st.tabs(["Admin", "Import", "Blackouts", "Administrators"])
+
+# ============================================================
 # Administrators tab
-# -----------------------------
+# ============================================================
 with tabs[3]:
     st.subheader("Administrators (allowlist)")
     st.caption("Add/remove admins by email. Removed admins lose access immediately.")
@@ -980,14 +971,15 @@ with tabs[3]:
     else:
         st.info("No active admins found (you should add at least one).")
 
-# -----------------------------
+# ============================================================
 # Import tab
-# -----------------------------
+# ============================================================
 with tabs[1]:
     st.subheader("Import CSVs")
 
     st.markdown("### Games CSV")
     st.caption("Required columns: game_id, date, start_time, home_team, away_team, field")
+
     games_file = st.file_uploader("Upload Games CSV", type=["csv"], key="games_csv")
     if games_file:
         df_games = pd.read_csv(games_file)
@@ -1021,7 +1013,6 @@ with tabs[1]:
                         f"Replaced referee list successfully. Imported {count} referee(s). "
                         "All assignments were reset to EMPTY."
                     )
-
                     # Clear all refpick_ widgets so stale names can't remain visible
                     for k in [k for k in st.session_state.keys() if str(k).startswith("refpick_")]:
                         st.session_state.pop(k, None)
@@ -1037,6 +1028,7 @@ with tabs[1]:
 
     st.markdown("### Blackouts CSV (optional)")
     st.caption("Required columns: email, blackout_date")
+
     bl_file = st.file_uploader("Upload Blackouts CSV", type=["csv"], key="bl_csv")
     if bl_file:
         df_bl = pd.read_csv(bl_file)
@@ -1046,9 +1038,9 @@ with tabs[1]:
             st.success(f"Imported blackouts. Added: {added}. Skipped (unknown referee email): {skipped}")
             st.rerun()
 
-# -----------------------------
+# ============================================================
 # Blackouts tab
-# -----------------------------
+# ============================================================
 with tabs[2]:
     st.subheader("Manage Blackout Dates (date-only)")
 
@@ -1103,9 +1095,9 @@ with tabs[2]:
         else:
             st.caption("No blackout dates set.")
 
-# -----------------------------
+# ============================================================
 # Admin tab
-# -----------------------------
+# ============================================================
 with tabs[0]:
     st.subheader("Games & Assignments")
 
@@ -1222,9 +1214,6 @@ with tabs[0]:
                     if blackout:
                         st.warning(f"Blackout date conflict: {gdate.isoformat()}")
 
-                    # -----------------------------
-                    # Action dropdown
-                    # -----------------------------
                     action_key = f"action_{a['id']}"
                     msg_key = f"msg_{a['id']}"
                     st.session_state.setdefault(action_key, "—")
@@ -1249,8 +1238,13 @@ with tabs[0]:
                         if choice == "—":
                             return
 
-                        # CRITICAL: fetch LIVE assignment row (fixes your “Select referee first” issue)
+                        # Fetch LIVE row (fixes “Select referee first” after a pick)
                         live_a = get_assignment_live(assignment_id)
+                        if not live_a:
+                            st.session_state[msg_key] = "Could not load assignment."
+                            st.session_state[action_key] = "—"
+                            st.rerun()
+
                         live_ref_id = live_a["referee_id"]
                         live_ref_name = live_a["ref_name"]
                         live_ref_email = live_a["ref_email"]
@@ -1281,12 +1275,6 @@ with tabs[0]:
                                 accept_url = f"{base}/?action=accept&token={token}"
                                 decline_url = f"{base}/?action=decline&token={token}"
 
-                                poc_offer_links = os.getenv("POC_REVEAL_OFFER_LINKS", "").lower() in ("1", "true", "yes", "on")
-                                if poc_offer_links:
-                                    st.info("POC mode: offer links shown below")
-                                    st.code(accept_url)
-                                    st.code(decline_url)
-
                                 subject = f"Referee Offer: {g['home_team']} vs {g['away_team']}"
                                 html = f"""
                                 <div style="font-family: Arial, sans-serif;">
@@ -1303,16 +1291,10 @@ with tabs[0]:
                                   </p>
                                 </div>
                                 """
-
-                                poc_skip = os.getenv("POC_SKIP_EMAIL_SENDING", "").lower() in ("1", "true", "yes", "on")
-                                if poc_skip:
-                                    st.warning("POC mode: email NOT sent. Use the links above.")
-                                else:
-                                    send_html_email(live_ref_email, live_ref_name, subject, html)
+                                send_html_email(live_ref_email, live_ref_name, subject, html)
 
                                 set_assignment_status(assignment_id, "OFFERED")
                                 st.session_state[msg_key] = "Offer sent and marked as OFFERED."
-
                             except Exception as e:
                                 st.session_state[msg_key] = str(e)
 
@@ -1322,7 +1304,6 @@ with tabs[0]:
 
                         elif choice in ("DELETE", "RESET"):
                             clear_assignment(assignment_id)
-                            # FORCE the selectbox to display empty
                             st.session_state[refpick_key] = "— Select referee —"
                             st.session_state[msg_key] = "Slot cleared (EMPTY)."
 
