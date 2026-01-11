@@ -15,39 +15,10 @@ from streamlit_autorefresh import st_autorefresh
 # CONFIG
 # ============================================================
 BASE_DIR = Path(__file__).resolve().parent
-
-# IMPORTANT for going online:
-# - If DB_PATH is set (e.g. /var/data/league.db on Render disk), we use it.
-# - Otherwise we keep the local file next to app.py
-import os
-from pathlib import Path
-
-BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "league.db"))
-
-
 LEAGUE_TZ = "Pacific/Auckland"
+
 st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
-
-
-def status_badge(text: str, bg: str, fg: str = "white"):
-    st.markdown(
-        f"""
-        <div style="
-            display:inline-block;
-            padding:6px 10px;
-            border-radius:8px;
-            background:{bg};
-            color:{fg};
-            font-weight:700;
-            font-size:14px;
-            ">
-            {text}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
 
 # ============================================================
 # DB
@@ -180,16 +151,29 @@ def now_iso():
 # ============================================================
 # Email (SMTP)
 # ============================================================
+import os
+import streamlit as st
+
 def smtp_settings():
-    s = st.secrets if hasattr(st, "secrets") else {}
+    # Streamlit secrets (local) + Render env vars (production)
+    s = {}
+    try:
+        s = dict(st.secrets)  # works if secrets.toml exists
+    except Exception:
+        s = {}
+
+    def get(key: str, default: str = "") -> str:
+        # Render env vars take priority; fall back to secrets.toml
+        return os.environ.get(key, str(s.get(key, default)))
+
     return {
-        "host": s.get("SMTP_HOST", ""),
-        "port": int(s.get("SMTP_PORT", 587)),
-        "user": s.get("SMTP_USER", ""),
-        "password": s.get("SMTP_PASSWORD", ""),
-        "from_email": s.get("SMTP_FROM_EMAIL", s.get("SMTP_USER", "")),
-        "from_name": s.get("SMTP_FROM_NAME", "Referee Allocator"),
-        "app_base_url": s.get("APP_BASE_URL", ""),  # e.g. https://your-app.onrender.com
+        "host": get("SMTP_HOST", ""),
+        "port": int(get("SMTP_PORT", "587") or 587),
+        "user": get("SMTP_USER", ""),
+        "password": get("SMTP_PASSWORD", ""),
+        "from_email": get("SMTP_FROM_EMAIL", get("SMTP_USER", "")),
+        "from_name": get("SMTP_FROM_NAME", "Referee Allocator"),
+        "app_base_url": get("APP_BASE_URL", ""),  # e.g. https://your-app.onrender.com
     }
 
 
@@ -198,8 +182,10 @@ def send_html_email(to_email: str, to_name: str, subject: str, html_body: str):
     if not (cfg["host"] and cfg["user"] and cfg["password"] and cfg["from_email"] and cfg["app_base_url"]):
         raise RuntimeError(
             "Email not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, "
-            "SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL in .streamlit/secrets.toml"
+            "SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL as Render Environment Variables "
+            "(or in .streamlit/secrets.toml for local dev)."
         )
+
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -393,10 +379,12 @@ def send_admin_login_email(email: str):
     token = create_admin_login_token(email)
     login_url = f"{base}/?admin_login=1&token={token}"
 
-    if st.secrets.get("POC_REVEAL_LOGIN_LINK", False):
+    poc_reveal = os.getenv("POC_REVEAL_LOGIN_LINK", "").lower() in ("1", "true", "yes", "on")
+    if poc_reveal:
         st.info("POC mode: admin login link shown below (email not sent)")
         st.code(login_url)
         return
+
 
     subject = "Admin login link"
     html = f"""
@@ -1275,7 +1263,8 @@ with tabs[0]:
                                 accept_url = f"{base}/?action=accept&token={token}"
                                 decline_url = f"{base}/?action=decline&token={token}"
 
-                                if st.secrets.get("POC_REVEAL_OFFER_LINKS", False):
+                                poc_offer_links = os.getenv("POC_REVEAL_OFFER_LINKS", "").lower() in ("1", "true", "yes", "on")
+                                if poc_offer_links:
                                     st.info("POC mode: offer links shown below")
                                     st.code(accept_url)
                                     st.code(decline_url)
@@ -1297,7 +1286,8 @@ with tabs[0]:
                                 </div>
                                 """
 
-                                if st.secrets.get("POC_SKIP_EMAIL_SENDING", False):
+                                poc_skip = os.getenv("POC_SKIP_EMAIL_SENDING", "").lower() in ("1", "true", "yes", "on")
+                                if poc_skip:
                                     st.warning("POC mode: email NOT sent. Use the links above.")
                                 else:
                                     send_html_email(live_ref_email, live_ref_name, subject, html)
