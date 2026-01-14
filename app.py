@@ -248,10 +248,16 @@ def send_html_email(to_email: str, to_name: str, subject: str, html_body: str, t
 # Admin auth helpers
 # ============================================================
 def is_admin_email_allowed(email: str) -> bool:
+    email = email.strip().lower()
+
+    # Emergency override (Render env var)
+    if email in ADMIN_OVERRIDE_EMAILS:
+        return True
+
     conn = db()
     row = conn.execute(
         "SELECT 1 FROM admins WHERE email=? AND active=1 LIMIT 1",
-        (email.strip().lower(),),
+        (email,),
     ).fetchone()
     conn.close()
     return bool(row)
