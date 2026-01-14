@@ -28,6 +28,7 @@ LEAGUE_TZ = "Pacific/Auckland"
 REF_PORTAL_ENABLED = os.getenv("REF_PORTAL_ENABLED", "false").lower() == "true"
 
 st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
+st.sidebar.success("RUNNING VERSION: PORTAL-TEST-001")
 
 APP_VERSION = "PORTAL-TEST-001"
 st.sidebar.success(f"Running version: {APP_VERSION}")
