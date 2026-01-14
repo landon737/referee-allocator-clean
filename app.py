@@ -1107,26 +1107,30 @@ if admin_count() == 0:
             st.success("First admin created. Now request a login link below.")
     st.markdown("---")
 
-# Login screen
+# Login screen (SMTP-free guaranteed login)
 if not st.session_state.get("admin_email"):
     st.subheader("Admin Login")
-    st.write("Enter your email to receive a one-time login link (15 minutes).")
+    st.write("Enter your email to generate a one-time login link (15 minutes).")
+
     email = st.text_input("Admin email", key="login_email")
-    if st.button("Send login link", key="send_login_link_btn"):
+
+    if st.button("Generate login link", key="gen_login_link_btn"):
         if not email.strip():
             st.error("Please enter an email.")
         elif not is_admin_email_allowed(email):
             st.error("That email is not an authorised administrator.")
         else:
-            try:
-                login_url = send_admin_login_email(email)
-                st.success("Login link created. If the email doesn’t arrive, use the link below:")
-                st.code(login_url)
-                st.markdown(f"[Open admin login link]({login_url})")
-            except Exception as e:
-                st.error(str(e))
+            cfg = smtp_settings()
+            base = cfg.get("app_base_url", "").rstrip("/")
+            token = create_admin_login_token(email.strip().lower())
+            login_url = f"{base}/?admin_login=1&token={token}"
+
+            st.success("Login link created. Open it below:")
+            st.code(login_url)
+            st.markdown(f"[Open admin login link]({login_url})")
 
     st.stop()
+
 
 # Logged in view
 admin_logout_button()
