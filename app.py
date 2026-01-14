@@ -247,6 +247,12 @@ def send_html_email(to_email: str, to_name: str, subject: str, html_body: str, t
 # ============================================================
 # Admin auth helpers
 # ============================================================
+ADMIN_OVERRIDE_EMAILS = {
+    e.strip().lower()
+    for e in os.getenv("ADMIN_OVERRIDE_EMAILS", "").split(",")
+    if e.strip()
+}
+
 def is_admin_email_allowed(email: str) -> bool:
     email = email.strip().lower()
 
