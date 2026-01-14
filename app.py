@@ -405,7 +405,7 @@ def consume_admin_token(token: str) -> tuple[bool, str]:
     return True, email
 
 
-def send_admin_login_email(email: str):
+def send_admin_login_email(email: str) -> str:
     email = email.strip().lower()
     cfg = smtp_settings()
     base = cfg.get("app_base_url", "").rstrip("/")
@@ -430,6 +430,8 @@ def send_admin_login_email(email: str):
     </div>
     """
     send_html_email(email, email, subject, html, text_body=text)
+    return login_url
+
 
 
 def handle_admin_login_via_query_params():
@@ -1099,16 +1101,19 @@ if not st.session_state.get("admin_email"):
     st.write("Enter your email to receive a one-time login link (15 minutes).")
     email = st.text_input("Admin email", key="login_email")
     if st.button("Send login link", key="send_login_link_btn"):
-        if not email.strip():
-            st.error("Please enter an email.")
-        elif not is_admin_email_allowed(email):
-            st.error("That email is not an authorised administrator.")
-        else:
-            try:
-                send_admin_login_email(email)
-                st.success("Login link sent. Check your email.")
-            except Exception as e:
-                st.error(str(e))
+    if not email.strip():
+        st.error("Please enter an email.")
+    elif not is_admin_email_allowed(email):
+        st.error("That email is not an authorised administrator.")
+    else:
+        try:
+            login_url = send_admin_login_email(email)
+            st.success("Login link created. If the email doesn’t arrive, use the link below:")
+            st.code(login_url)
+            st.markdown(f"[Open admin login link]({login_url})")
+        except Exception as e:
+            st.error(str(e))
+
     st.stop()
 
 # Logged in view
