@@ -33,6 +33,12 @@ st.sidebar.success("RUNNING VERSION: PORTAL-TEST-001")
 APP_VERSION = "PORTAL-TEST-001"
 st.sidebar.success(f"Running version: {APP_VERSION}")
 
+ADMIN_OVERRIDE_EMAILS = {
+    e.strip().lower()
+    for e in os.getenv("ADMIN_OVERRIDE_EMAILS", "").split(",")
+    if e.strip()
+}
+
 # ============================================================
 # UI helpers
 # ============================================================
@@ -247,11 +253,24 @@ def send_html_email(to_email: str, to_name: str, subject: str, html_body: str, t
 # ============================================================
 # Admin auth helpers
 # ============================================================
+
+ADMIN_OVERRIDE_EMAILS = {
+    e.strip().lower()
+    for e in os.getenv("ADMIN_OVERRIDE_EMAILS", "").split(",")
+    if e.strip()
+}
+
 def is_admin_email_allowed(email: str) -> bool:
+    email = email.strip().lower()
+
+    # Emergency override (Render env var)
+    if email in ADMIN_OVERRIDE_EMAILS:
+        return True
+
     conn = db()
     row = conn.execute(
         "SELECT 1 FROM admins WHERE email=? AND active=1 LIMIT 1",
-        (email.strip().lower(),),
+        (email,),
     ).fetchone()
     conn.close()
     return bool(row)
