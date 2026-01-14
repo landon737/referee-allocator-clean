@@ -17,13 +17,16 @@ from streamlit_autorefresh import st_autorefresh
 # ============================================================
 BASE_DIR = Path(__file__).resolve().parent
 
-# Production: set DB_PATH in Render Environment (recommended) to your persistent disk path.
+# Production: set DB_PATH in Render Environment to your persistent disk path.
 # Local: falls back to ./league.db next to app.py
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "league.db"))
-# Ensure the folder for the database exists (critical on Render)
 Path(DB_PATH).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
 LEAGUE_TZ = "Pacific/Auckland"
+
+# Feature flag for referee portal
+REF_PORTAL_ENABLED = os.getenv("REF_PORTAL_ENABLED", "false").lower() == "true"
+
 st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
 
 
@@ -47,7 +50,6 @@ def status_badge(text: str, bg: str, fg: str = "white"):
         """,
         unsafe_allow_html=True,
     )
-
 
 
 # ============================================================
@@ -203,7 +205,10 @@ def smtp_settings():
     }
 
 
-def send_html_email(to_email: str, to_name: str, subject: str, html_body: str):
+def send_html_email(to_email: str, to_name: str, subject: str, html_body: str, text_body: str | None = None):
+    """
+    Multipart/alternative: always include text/plain + text/html (helps Gmail deliverability).
+    """
     cfg = smtp_settings()
     if not (cfg["host"] and cfg["user"] and cfg["password"] and cfg["from_email"] and cfg["app_base_url"]):
         raise RuntimeError(
@@ -215,6 +220,10 @@ def send_html_email(to_email: str, to_name: str, subject: str, html_body: str):
     msg["Subject"] = subject
     msg["From"] = f'{cfg["from_name"]} <{cfg["from_email"]}>'
     msg["To"] = f"{to_name} <{to_email}>"
+
+    if not text_body:
+        text_body = "You have a notification from Referee Allocator."
+    msg.attach(MIMEText(text_body, "plain"))
     msg.attach(MIMEText(html_body, "html"))
 
     with smtplib.SMTP(cfg["host"], cfg["port"]) as server:
@@ -404,6 +413,10 @@ def send_admin_login_email(email: str):
     login_url = f"{base}/?admin_login=1&token={token}"
 
     subject = "Admin login link"
+    text = (
+        "Use this link to sign in as an administrator (expires in 15 minutes):\n"
+        f"{login_url}\n"
+    )
     html = f"""
     <div style="font-family: Arial, sans-serif; line-height: 1.4;">
       <p>Hi,</p>
@@ -416,7 +429,7 @@ def send_admin_login_email(email: str):
       <p>If you didn’t request this, you can ignore this email.</p>
     </div>
     """
-    send_html_email(email, email, subject, html)
+    send_html_email(email, email, subject, html, text_body=text)
 
 
 def handle_admin_login_via_query_params():
@@ -871,7 +884,163 @@ def resolve_offer(token: str, response: str) -> tuple[bool, str]:
 
 
 # ============================================================
-# Public offer handler
+# Referee portal (My Offers)
+# ============================================================
+def get_offer_details_by_token(token: str):
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT
+            o.id AS offer_id,
+            o.token,
+            o.created_at,
+            o.responded_at,
+            o.response,
+            a.id AS assignment_id,
+            a.slot_no,
+            a.referee_id,
+            a.status,
+            r.name AS ref_name,
+            r.email AS ref_email,
+            g.home_team,
+            g.away_team,
+            g.field_name,
+            g.start_dt
+        FROM offers o
+        JOIN assignments a ON a.id = o.assignment_id
+        JOIN games g ON g.id = a.game_id
+        LEFT JOIN referees r ON r.id = a.referee_id
+        WHERE o.token=?
+        LIMIT 1
+        """,
+        (token,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def list_offers_for_referee(referee_id: int):
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT
+            o.id AS offer_id,
+            o.token,
+            o.created_at,
+            o.responded_at,
+            o.response,
+            a.id AS assignment_id,
+            a.slot_no,
+            a.status,
+            g.home_team,
+            g.away_team,
+            g.field_name,
+            g.start_dt
+        FROM offers o
+        JOIN assignments a ON a.id = o.assignment_id
+        JOIN games g ON g.id = a.game_id
+        WHERE a.referee_id=?
+        ORDER BY o.created_at DESC
+        """,
+        (referee_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def maybe_handle_referee_portal_login():
+    if not REF_PORTAL_ENABLED:
+        return
+
+    qp = st.query_params
+    offer_token = qp.get("offer_token")
+    if not offer_token:
+        return
+
+    offer = get_offer_details_by_token(offer_token)
+    if not offer:
+        st.title("My Offers")
+        st.error("That offer link is invalid.")
+        st.stop()
+
+    if offer["referee_id"] is None:
+        st.title("My Offers")
+        st.error("This offer is not linked to a referee. Please contact the administrator.")
+        st.stop()
+
+    st.session_state["referee_id"] = int(offer["referee_id"])
+    st.session_state["referee_name"] = offer["ref_name"] or "Referee"
+    st.session_state["referee_email"] = offer["ref_email"] or ""
+
+    # Clean the URL
+    st.query_params.clear()
+    st.rerun()
+
+
+def referee_logout_button():
+    if st.session_state.get("referee_id"):
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st.caption(f"Logged in as: {st.session_state.get('referee_name')} ({st.session_state.get('referee_email')})")
+        with c2:
+            if st.button("Log out", key="ref_logout_btn"):
+                st.session_state.pop("referee_id", None)
+                st.session_state.pop("referee_name", None)
+                st.session_state.pop("referee_email", None)
+                st.rerun()
+
+
+def render_my_offers_page() -> bool:
+    if not REF_PORTAL_ENABLED:
+        return False
+
+    ref_id = st.session_state.get("referee_id")
+    if not ref_id:
+        return False
+
+    st.title("My Offers")
+    referee_logout_button()
+    st.markdown("---")
+
+    offers = list_offers_for_referee(int(ref_id))
+    if not offers:
+        st.info("You have no offers at the moment.")
+        return True
+
+    for o in offers:
+        start_dt = dtparser.parse(o["start_dt"])
+        title = f"{o['home_team']} vs {o['away_team']}"
+        subtitle = f"Field: {o['field_name']} • Start: {start_dt.strftime('%Y-%m-%d %H:%M')} • Slot {o['slot_no']}"
+
+        with st.container(border=True):
+            st.subheader(title)
+            st.caption(subtitle)
+
+            if o["responded_at"]:
+                st.success(f"Response recorded: {o['response']}")
+            else:
+                c1, c2 = st.columns(2)
+                if c1.button("Accept", key=f"portal_acc_{o['token']}"):
+                    ok, msg = resolve_offer(o["token"], "ACCEPTED")
+                    if ok:
+                        st.success("Accepted. Thank you.")
+                    else:
+                        st.error(msg)
+                    st.rerun()
+
+                if c2.button("Decline", key=f"portal_dec_{o['token']}"):
+                    ok, msg = resolve_offer(o["token"], "DECLINED")
+                    if ok:
+                        st.success("Declined. Thank you.")
+                    else:
+                        st.error(msg)
+                    st.rerun()
+
+    return True
+
+
+# ============================================================
+# Public offer handler (legacy accept/decline links)
 # ============================================================
 def maybe_handle_offer_response():
     qp = st.query_params
@@ -894,7 +1063,17 @@ def maybe_handle_offer_response():
 # ============================================================
 init_db()
 
+# Referee portal: allow login before admin login
+maybe_handle_referee_portal_login()
+
+# Legacy accept/decline links still supported
 maybe_handle_offer_response()
+
+# If referee is logged in, show portal and stop (no admin UI)
+if render_my_offers_page():
+    st.stop()
+
+# Admin login flow
 handle_admin_login_via_query_params()
 maybe_restore_admin_from_session_param()
 
@@ -1017,7 +1196,6 @@ with tabs[1]:
                         f"Replaced referee list successfully. Imported {count} referee(s). "
                         "All assignments were reset to EMPTY."
                     )
-                    # Clear all refpick_ widgets so stale names can't remain visible
                     for k in [k for k in st.session_state.keys() if str(k).startswith("refpick_")]:
                         st.session_state.pop(k, None)
                 else:
@@ -1183,7 +1361,6 @@ with tabs[0]:
                         disabled=(status in ("ACCEPTED", "ASSIGNED")),
                     )
 
-                    # Apply selection to DB
                     if pick != "— Select referee —":
                         chosen_ref_id = ref_lookup[pick]
                         if status in ("ACCEPTED", "ASSIGNED"):
@@ -1242,7 +1419,6 @@ with tabs[0]:
                         if choice == "—":
                             return
 
-                        # Fetch LIVE row (fixes “Select referee first” after a pick)
                         live_a = get_assignment_live(assignment_id)
                         if not live_a:
                             st.session_state[msg_key] = "Could not load assignment."
@@ -1276,29 +1452,78 @@ with tabs[0]:
                                 token = create_offer(assignment_id)
                                 cfg = smtp_settings()
                                 base = cfg.get("app_base_url", "").rstrip("/")
-                                accept_url = f"{base}/?action=accept&token={token}"
-                                decline_url = f"{base}/?action=decline&token={token}"
 
-                                subject = f"Referee Offer: {g['home_team']} vs {g['away_team']}"
-                                html = f"""
-                                <div style="font-family: Arial, sans-serif;">
-                                  <p>Hi {live_ref_name},</p>
-                                  <p>You have been offered a referee assignment:</p>
-                                  <ul>
-                                    <li><b>Game:</b> {g['home_team']} vs {g['away_team']}</li>
-                                    <li><b>Field:</b> {g['field_name']}</li>
-                                    <li><b>Start:</b> {start_dt.strftime('%Y-%m-%d %H:%M')}</li>
-                                  </ul>
-                                  <p>
-                                    <a href="{accept_url}">ACCEPT</a> |
-                                    <a href="{decline_url}">DECLINE</a>
-                                  </p>
-                                </div>
-                                """
-                                send_html_email(live_ref_email, live_ref_name, subject, html)
+                                game_line = f"{g['home_team']} vs {g['away_team']}"
+                                when_line = start_dt.strftime("%Y-%m-%d %H:%M")
+
+                                # Better deliverability: personalised subject
+                                subject = f"{live_ref_name} — Match assignment: {g['home_team']} vs {g['away_team']}"
+
+                                if REF_PORTAL_ENABLED:
+                                    portal_url = f"{base}/?offer_token={token}"
+
+                                    text = (
+                                        f"Hi {live_ref_name},\n\n"
+                                        f"You have a match assignment offer:\n"
+                                        f"- Game: {game_line}\n"
+                                        f"- Field: {g['field_name']}\n"
+                                        f"- Start: {when_line}\n\n"
+                                        f"View and respond here:\n{portal_url}\n"
+                                    )
+
+                                    html = f"""
+                                    <div style="font-family: Arial, sans-serif; line-height:1.4;">
+                                      <p>Hi {live_ref_name},</p>
+                                      <p>You have a match assignment offer:</p>
+                                      <ul>
+                                        <li><b>Game:</b> {game_line}</li>
+                                        <li><b>Field:</b> {g['field_name']}</li>
+                                        <li><b>Start:</b> {when_line}</li>
+                                      </ul>
+                                      <p>
+                                        <a href="{portal_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
+                                          View offer
+                                        </a>
+                                      </p>
+                                      <p style="color:#666;font-size:12px;">If the button doesn’t work, copy and paste this link:<br>{portal_url}</p>
+                                    </div>
+                                    """
+                                    send_html_email(live_ref_email, live_ref_name, subject, html, text_body=text)
+
+                                else:
+                                    accept_url = f"{base}/?action=accept&token={token}"
+                                    decline_url = f"{base}/?action=decline&token={token}"
+
+                                    text = (
+                                        f"Hi {live_ref_name},\n\n"
+                                        f"You have a referee assignment offer:\n"
+                                        f"- Game: {game_line}\n"
+                                        f"- Field: {g['field_name']}\n"
+                                        f"- Start: {when_line}\n\n"
+                                        f"Accept: {accept_url}\n"
+                                        f"Decline: {decline_url}\n"
+                                    )
+
+                                    html = f"""
+                                    <div style="font-family: Arial, sans-serif; line-height:1.4;">
+                                      <p>Hi {live_ref_name},</p>
+                                      <p>You have been offered a referee assignment:</p>
+                                      <ul>
+                                        <li><b>Game:</b> {game_line}</li>
+                                        <li><b>Field:</b> {g['field_name']}</li>
+                                        <li><b>Start:</b> {when_line}</li>
+                                      </ul>
+                                      <p>
+                                        <a href="{accept_url}">ACCEPT</a> |
+                                        <a href="{decline_url}">DECLINE</a>
+                                      </p>
+                                    </div>
+                                    """
+                                    send_html_email(live_ref_email, live_ref_name, subject, html, text_body=text)
 
                                 set_assignment_status(assignment_id, "OFFERED")
                                 st.session_state[msg_key] = "Offer sent and marked as OFFERED."
+
                             except Exception as e:
                                 st.session_state[msg_key] = str(e)
 
