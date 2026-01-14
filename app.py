@@ -186,10 +186,19 @@ def init_db():
 # ============================================================
 def smtp_settings():
     # Env vars (Render) take priority; secrets.toml (local) is fallback.
-    try:
-        secrets_dict = dict(st.secrets)
-    except Exception:
-        secrets_dict = {}
+    secrets_dict = {}
+
+    # Only attempt st.secrets if a secrets file actually exists
+    secrets_paths = [
+        "/opt/render/.streamlit/secrets.toml",
+        "/opt/render/project/src/.streamlit/secrets.toml",
+        str(BASE_DIR / ".streamlit" / "secrets.toml"),  # local dev
+    ]
+    if any(os.path.exists(p) for p in secrets_paths):
+        try:
+            secrets_dict = dict(st.secrets)
+        except Exception:
+            secrets_dict = {}
 
     def get(key: str, default: str = "") -> str:
         return os.environ.get(key, str(secrets_dict.get(key, default)))
@@ -201,7 +210,7 @@ def smtp_settings():
         "password": get("SMTP_PASSWORD", ""),
         "from_email": get("SMTP_FROM_EMAIL", get("SMTP_USER", "")),
         "from_name": get("SMTP_FROM_NAME", "Referee Allocator"),
-        "app_base_url": get("APP_BASE_URL", "").rstrip("/"),  # https://xxxx.onrender.com
+        "app_base_url": get("APP_BASE_URL", "").rstrip("/"),
     }
 
 
