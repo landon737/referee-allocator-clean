@@ -223,13 +223,7 @@ def smtp_settings():
     }
 
 
-def send_html_email(
-    to_email: str,
-    to_name: str,
-    subject: str,
-    html_body: str,
-    text_body: str | None = None,
-):
+def send_html_email
     """
     Multipart/alternative: text/plain + text/html
     IMPORTANT: SMTP timeout to prevent Streamlit websocket drops.
@@ -848,6 +842,11 @@ def create_offer(assignment_id: int) -> str:
     conn.close()
     return token
 
+def delete_offer_by_token(token: str):
+    conn = db()
+    conn.execute("DELETE FROM offers WHERE token=?", (token,))
+    conn.commit()
+    conn.close()
 
 def resolve_offer(token: str, response: str) -> tuple[bool, str]:
     conn = db()
@@ -1071,6 +1070,98 @@ def maybe_handle_offer_response():
         st.info("You can close this page now.")
         st.stop()
 
+def send_offer_email_and_mark_offered(
+    *,
+    assignment_id: int,
+    referee_name: str,
+    referee_email: str,
+    game: dict,
+    start_dt,
+    msg_key: str,
+):
+    token = create_offer(assignment_id)
+
+    try:
+        cfg = smtp_settings()
+        base = cfg.get("app_base_url", "").rstrip("/")
+
+        game_line = f"{game['home_team']} vs {game['away_team']}"
+        when_line = start_dt.strftime("%Y-%m-%d %H:%M")
+        subject = f"{referee_name} — Match assignment"
+
+        if REF_PORTAL_ENABLED:
+            portal_url = f"{base}/?offer_token={token}"
+
+            text = (
+                f"Hi {referee_name},\n\n"
+                f"You have a match assignment offer:\n"
+                f"- Game: {game_line}\n"
+                f"- Field: {game['field_name']}\n"
+                f"- Start: {when_line}\n\n"
+                f"View and respond here:\n{portal_url}\n"
+            )
+
+            html = f"""
+            <div style="font-family: Arial, sans-serif; line-height:1.4;">
+              <p>Hi {referee_name},</p>
+              <p>You have a match assignment offer:</p>
+              <ul>
+                <li><b>Game:</b> {game_line}</li>
+                <li><b>Field:</b> {game['field_name']}</li>
+                <li><b>Start:</b> {when_line}</li>
+              </ul>
+              <p>
+                <a href="{portal_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
+                  View offer
+                </a>
+              </p>
+              <p style="font-size:12px;color:#666;">
+                If the button doesn’t work, copy and paste this link:<br>{portal_url}
+              </p>
+            </div>
+            """
+
+            send_html_email(referee_email, referee_name, subject, html, text_body=text)
+
+        else:
+            accept_url = f"{base}/?action=accept&token={token}"
+            decline_url = f"{base}/?action=decline&token={token}"
+
+            text = (
+                f"Hi {referee_name},\n\n"
+                f"You have a referee assignment offer:\n"
+                f"- Game: {game_line}\n"
+                f"- Field: {game['field_name']}\n"
+                f"- Start: {when_line}\n\n"
+                f"Accept: {accept_url}\n"
+                f"Decline: {decline_url}\n"
+            )
+
+            html = f"""
+            <div style="font-family: Arial, sans-serif; line-height:1.4;">
+              <p>Hi {referee_name},</p>
+              <p>You have been offered a referee assignment:</p>
+              <ul>
+                <li><b>Game:</b> {game_line}</li>
+                <li><b>Field:</b> {game['field_name']}</li>
+                <li><b>Start:</b> {when_line}</li>
+              </ul>
+              <p>
+                <a href="{accept_url}">ACCEPT</a> |
+                <a href="{decline_url}">DECLINE</a>
+              </p>
+            </div>
+            """
+
+            send_html_email(referee_email, referee_name, subject, html, text_body=text)
+
+        # ✅ Only now mark OFFERED
+        set_assignment_status(assignment_id, "OFFERED")
+        st.session_state[msg_key] = "Offer emailed successfully and marked as OFFERED."
+
+    except Exception as e:
+        delete_offer_by_token(token)
+        st.session_state[msg_key] = f"Email failed — offer not created: {e}"
 
 # ============================================================
 # APP START
@@ -1468,111 +1559,11 @@ with tabs[0]:
                             return
 
                         if choice == "OFFER":
-                            if blackout:
-                                st.session_state[msg_key] = (
-                                    "Offer blocked: referee is unavailable on this date (blackout). "
-                                    "You can still ASSIGN manually if needed."
-                                )
-                                st.session_state[action_key] = "—"
-                                return
-
-                            try:
-                                token = create_offer(assignment_id)
-
-                                # Mark OFFERED immediately so offers never fail due to email
-                                set_assignment_status(assignment_id, "OFFERED")
-
-                                cfg = smtp_settings()
-                                base = cfg.get("app_base_url", "").rstrip("/")
-
-                                game_line = f"{g['home_team']} vs {g['away_team']}"
-                                when_line = start_dt.strftime("%Y-%m-%d %H:%M")
-                                subject = f"{live_ref_name} — Match assignment: {g['home_team']} vs {g['away_team']}"
-
-                                if REF_PORTAL_ENABLED:
-                                    portal_url = f"{base}/?offer_token={token}"
-
-                                    text = (
-                                        f"Hi {live_ref_name},\n\n"
-                                        f"You have a match assignment offer:\n"
-                                        f"- Game: {game_line}\n"
-                                        f"- Field: {g['field_name']}\n"
-                                        f"- Start: {when_line}\n\n"
-                                        f"View and respond here:\n{portal_url}\n"
-                                    )
-
-                                    html = f"""
-                                    <div style="font-family: Arial, sans-serif; line-height:1.4;">
-                                      <p>Hi {live_ref_name},</p>
-                                      <p>You have a match assignment offer:</p>
-                                      <ul>
-                                        <li><b>Game:</b> {game_line}</li>
-                                        <li><b>Field:</b> {g['field_name']}</li>
-                                        <li><b>Start:</b> {when_line}</li>
-                                      </ul>
-                                      <p>
-                                        <a href="{portal_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
-                                          View offer
-                                        </a>
-                                      </p>
-                                      <p style="color:#666;font-size:12px;">If the button doesn’t work, copy and paste this link:<br>{portal_url}</p>
-                                    </div>
-                                    """
-                                    send_html_email(live_ref_email, live_ref_name, subject, html, text_body=text)
-                                    st.session_state[msg_key] = "Offer created and marked OFFERED. Email sent."
-                                else:
-                                    accept_url = f"{base}/?action=accept&token={token}"
-                                    decline_url = f"{base}/?action=decline&token={token}"
-
-                                    text = (
-                                        f"Hi {live_ref_name},\n\n"
-                                        f"You have a referee assignment offer:\n"
-                                        f"- Game: {game_line}\n"
-                                        f"- Field: {g['field_name']}\n"
-                                        f"- Start: {when_line}\n\n"
-                                        f"Accept: {accept_url}\n"
-                                        f"Decline: {decline_url}\n"
-                                    )
-
-                                    html = f"""
-                                    <div style="font-family: Arial, sans-serif; line-height:1.4;">
-                                      <p>Hi {live_ref_name},</p>
-                                      <p>You have been offered a referee assignment:</p>
-                                      <ul>
-                                        <li><b>Game:</b> {game_line}</li>
-                                        <li><b>Field:</b> {g['field_name']}</li>
-                                        <li><b>Start:</b> {when_line}</li>
-                                      </ul>
-                                      <p>
-                                        <a href="{accept_url}">ACCEPT</a> |
-                                        <a href="{decline_url}">DECLINE</a>
-                                      </p>
-                                    </div>
-                                    """
-                                    send_html_email(live_ref_email, live_ref_name, subject, html, text_body=text)
-                                    st.session_state[msg_key] = "Offer created and marked OFFERED. Email sent."
-
-                            except Exception as e:
-                                st.session_state[msg_key] = f"Offer created and marked OFFERED, but email failed: {e}"
-
-                        elif choice == "ASSIGN":
-                            set_assignment_status(assignment_id, "ASSIGNED")
-                            st.session_state[msg_key] = "Assigned."
-
-                        elif choice in ("DELETE", "RESET"):
-                            clear_assignment(assignment_id)
-                            st.session_state[refpick_key] = "— Select referee —"
-                            st.session_state[msg_key] = "Slot cleared (EMPTY)."
-
-                        st.session_state[action_key] = "—"
-                        st.rerun()
-
-                    st.selectbox(
-                        "Action",
-                        action_options,
-                        key=action_key,
-                        on_change=on_action_change,
-                    )
-
-                    if st.session_state.get(msg_key):
-                        st.info(st.session_state[msg_key])
+                            send_offer_email_and_mark_offered(
+                                assignment_id=assignment_id,
+                                referee_name=live_ref_name,
+                                referee_email=live_ref_email,
+                                game=g,
+                                start_dt=start_dt,
+                                msg_key=msg_key,
+                            )
