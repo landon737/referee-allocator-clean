@@ -1,6 +1,7 @@
 # =========================
 # PDF helpers (CLEAN + SAFE)
 # =========================
+print("=== STREAMLIT BOOT ===")
 from io import BytesIO
 from datetime import datetime, date, timedelta
 
