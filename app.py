@@ -27,11 +27,15 @@ LEAGUE_TZ = "Pacific/Auckland"
 # Feature flag for referee portal
 REF_PORTAL_ENABLED = os.getenv("REF_PORTAL_ENABLED", "false").lower() == "true"
 
-st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
-st.sidebar.success("RUNNING VERSION: PORTAL-TEST-001")
+# Break-glass admin override (Render env var)
+ADMIN_OVERRIDE_EMAILS = {
+    e.strip().lower()
+    for e in os.getenv("ADMIN_OVERRIDE_EMAILS", "").split(",")
+    if e.strip()
+}
 
-APP_VERSION = "PORTAL-TEST-001"
-st.sidebar.success(f"Running version: {APP_VERSION}")
+st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
+
 
 # ============================================================
 # UI helpers
@@ -188,14 +192,16 @@ def init_db():
 # Email (SMTP)
 # ============================================================
 def smtp_settings():
-    # Env vars (Render) take priority; secrets.toml (local) is fallback.
+    """
+    Render: use environment variables.
+    Local: secrets.toml can be used.
+    """
     secrets_dict = {}
 
-    # Only attempt st.secrets if a secrets file actually exists
     secrets_paths = [
         "/opt/render/.streamlit/secrets.toml",
         "/opt/render/project/src/.streamlit/secrets.toml",
-        str(BASE_DIR / ".streamlit" / "secrets.toml"),  # local dev
+        str(BASE_DIR / ".streamlit" / "secrets.toml"),
     ]
     if any(os.path.exists(p) for p in secrets_paths):
         try:
@@ -217,9 +223,16 @@ def smtp_settings():
     }
 
 
-def send_html_email(to_email: str, to_name: str, subject: str, html_body: str, text_body: str | None = None):
+def send_html_email(
+    to_email: str,
+    to_name: str,
+    subject: str,
+    html_body: str,
+    text_body: str | None = None,
+):
     """
-    Multipart/alternative: always include text/plain + text/html (helps Gmail deliverability).
+    Multipart/alternative: text/plain + text/html
+    IMPORTANT: SMTP timeout to prevent Streamlit websocket drops.
     """
     cfg = smtp_settings()
     if not (cfg["host"] and cfg["user"] and cfg["password"] and cfg["from_email"] and cfg["app_base_url"]):
@@ -238,25 +251,24 @@ def send_html_email(to_email: str, to_name: str, subject: str, html_body: str, t
     msg.attach(MIMEText(text_body, "plain"))
     msg.attach(MIMEText(html_body, "html"))
 
-    with smtplib.SMTP(cfg["host"], cfg["port"]) as server:
-        server.starttls()
-        server.login(cfg["user"], cfg["password"])
-        server.sendmail(cfg["from_email"], [to_email], msg.as_string())
+    try:
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=15) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(cfg["user"], cfg["password"])
+            server.sendmail(cfg["from_email"], [to_email], msg.as_string())
+    except Exception as e:
+        raise RuntimeError(f"SMTP send failed: {type(e).__name__}: {e}")
 
 
 # ============================================================
 # Admin auth helpers
 # ============================================================
-ADMIN_OVERRIDE_EMAILS = {
-    e.strip().lower()
-    for e in os.getenv("ADMIN_OVERRIDE_EMAILS", "").split(",")
-    if e.strip()
-}
-
 def is_admin_email_allowed(email: str) -> bool:
     email = email.strip().lower()
 
-    # Emergency override (Render env var)
+    # Break-glass override (Render env var)
     if email in ADMIN_OVERRIDE_EMAILS:
         return True
 
@@ -429,35 +441,6 @@ def consume_admin_token(token: str) -> tuple[bool, str]:
     return True, email
 
 
-def send_admin_login_email(email: str) -> str:
-    email = email.strip().lower()
-    cfg = smtp_settings()
-    base = cfg.get("app_base_url", "").rstrip("/")
-    token = create_admin_login_token(email)
-    login_url = f"{base}/?admin_login=1&token={token}"
-
-    subject = "Admin login link"
-    text = (
-        "Use this link to sign in as an administrator (expires in 15 minutes):\n"
-        f"{login_url}\n"
-    )
-    html = f"""
-    <div style="font-family: Arial, sans-serif; line-height: 1.4;">
-      <p>Hi,</p>
-      <p>Use the button below to sign in as an administrator. This link expires in <b>15 minutes</b>.</p>
-      <p>
-        <a href="{login_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
-          Sign in
-        </a>
-      </p>
-      <p>If you didn’t request this, you can ignore this email.</p>
-    </div>
-    """
-    send_html_email(email, email, subject, html, text_body=text)
-    return login_url
-
-
-
 def handle_admin_login_via_query_params():
     qp = st.query_params
     if qp.get("admin_login") == "1" and qp.get("token"):
@@ -472,7 +455,7 @@ def handle_admin_login_via_query_params():
         else:
             st.title("Admin Login")
             st.error(value)
-            st.info("Please go back and request a new login link.")
+            st.info("Please go back and generate a new login link.")
             st.stop()
 
 
@@ -998,7 +981,6 @@ def maybe_handle_referee_portal_login():
     st.session_state["referee_name"] = offer["ref_name"] or "Referee"
     st.session_state["referee_email"] = offer["ref_email"] or ""
 
-    # Clean the URL
     st.query_params.clear()
     st.rerun()
 
@@ -1007,7 +989,10 @@ def referee_logout_button():
     if st.session_state.get("referee_id"):
         c1, c2 = st.columns([3, 1])
         with c1:
-            st.caption(f"Logged in as: {st.session_state.get('referee_name')} ({st.session_state.get('referee_email')})")
+            st.caption(
+                f"Logged in as: {st.session_state.get('referee_name')} "
+                f"({st.session_state.get('referee_email')})"
+            )
         with c2:
             if st.button("Log out", key="ref_logout_btn"):
                 st.session_state.pop("referee_id", None)
@@ -1036,7 +1021,10 @@ def render_my_offers_page() -> bool:
     for o in offers:
         start_dt = dtparser.parse(o["start_dt"])
         title = f"{o['home_team']} vs {o['away_team']}"
-        subtitle = f"Field: {o['field_name']} • Start: {start_dt.strftime('%Y-%m-%d %H:%M')} • Slot {o['slot_no']}"
+        subtitle = (
+            f"Field: {o['field_name']} • Start: {start_dt.strftime('%Y-%m-%d %H:%M')} "
+            f"• Slot {o['slot_no']}"
+        )
 
         with st.container(border=True):
             st.subheader(title)
@@ -1116,14 +1104,13 @@ if admin_count() == 0:
             st.error("Please enter an email.")
         else:
             add_admin(first_email)
-            st.success("First admin created. Now request a login link below.")
+            st.success("First admin created. Now generate a login link below.")
     st.markdown("---")
 
-# Login screen (SMTP-free guaranteed login)
+# Login screen (SMTP-free, always works)
 if not st.session_state.get("admin_email"):
     st.subheader("Admin Login")
     st.write("Enter your email to generate a one-time login link (15 minutes).")
-
     email = st.text_input("Admin email", key="login_email")
 
     if st.button("Generate login link", key="gen_login_link_btn"):
@@ -1143,7 +1130,6 @@ if not st.session_state.get("admin_email"):
 
     st.stop()
 
-
 # Logged in view
 admin_logout_button()
 
@@ -1159,7 +1145,14 @@ with tabs[3]:
     admins = list_admins()
     if admins:
         df_admins = pd.DataFrame(
-            [{"email": a["email"], "active": "YES" if a["active"] == 1 else "NO", "created_at": a["created_at"]} for a in admins]
+            [
+                {
+                    "email": a["email"],
+                    "active": "YES" if a["active"] == 1 else "NO",
+                    "created_at": a["created_at"],
+                }
+                for a in admins
+            ]
         )
         st.dataframe(df_admins, use_container_width=True)
 
@@ -1186,6 +1179,7 @@ with tabs[3]:
                 st.rerun()
     else:
         st.info("No active admins found (you should add at least one).")
+
 
 # ============================================================
 # Import tab
@@ -1234,7 +1228,6 @@ with tabs[1]:
                 else:
                     added, updated = import_referees_csv(df_refs)
                     st.success(f"Imported referees. Added: {added}, Updated: {updated}")
-
                 st.rerun()
             except Exception as e:
                 st.error(str(e))
@@ -1252,6 +1245,7 @@ with tabs[1]:
             added, skipped = import_blackouts_csv(df_bl)
             st.success(f"Imported blackouts. Added: {added}. Skipped (unknown referee email): {skipped}")
             st.rerun()
+
 
 # ============================================================
 # Blackouts tab
@@ -1309,6 +1303,7 @@ with tabs[2]:
                 st.rerun()
         else:
             st.caption("No blackout dates set.")
+
 
 # ============================================================
 # Admin tab
@@ -1483,13 +1478,15 @@ with tabs[0]:
 
                             try:
                                 token = create_offer(assignment_id)
+
+                                # Mark OFFERED immediately so offers never fail due to email
+                                set_assignment_status(assignment_id, "OFFERED")
+
                                 cfg = smtp_settings()
                                 base = cfg.get("app_base_url", "").rstrip("/")
 
                                 game_line = f"{g['home_team']} vs {g['away_team']}"
                                 when_line = start_dt.strftime("%Y-%m-%d %H:%M")
-
-                                # Better deliverability: personalised subject
                                 subject = f"{live_ref_name} — Match assignment: {g['home_team']} vs {g['away_team']}"
 
                                 if REF_PORTAL_ENABLED:
@@ -1522,7 +1519,7 @@ with tabs[0]:
                                     </div>
                                     """
                                     send_html_email(live_ref_email, live_ref_name, subject, html, text_body=text)
-
+                                    st.session_state[msg_key] = "Offer created and marked OFFERED. Email sent."
                                 else:
                                     accept_url = f"{base}/?action=accept&token={token}"
                                     decline_url = f"{base}/?action=decline&token={token}"
@@ -1553,12 +1550,10 @@ with tabs[0]:
                                     </div>
                                     """
                                     send_html_email(live_ref_email, live_ref_name, subject, html, text_body=text)
-
-                                set_assignment_status(assignment_id, "OFFERED")
-                                st.session_state[msg_key] = "Offer sent and marked as OFFERED."
+                                    st.session_state[msg_key] = "Offer created and marked OFFERED. Email sent."
 
                             except Exception as e:
-                                st.session_state[msg_key] = str(e)
+                                st.session_state[msg_key] = f"Offer created and marked OFFERED, but email failed: {e}"
 
                         elif choice == "ASSIGN":
                             set_assignment_status(assignment_id, "ASSIGNED")
