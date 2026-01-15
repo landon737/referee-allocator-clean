@@ -1046,7 +1046,19 @@ def delete_offer_by_token(token: str):
     conn.close()
 
 
-def resolve_offer(token: str, response: str) -> tuple[bool, str]:
+def def resolve_offer(token: str, response: str) -> tuple[bool, str]:
+    """
+    Record (or overwrite) a referee response for an offer token.
+
+    Overwrite is allowed:
+    - offers.responded_at is set to now again
+    - offers.response is overwritten
+    - assignments.status is set to ACCEPTED/DECLINED accordingly
+    """
+    response = (response or "").strip().upper()
+    if response not in ("ACCEPTED", "DECLINED"):
+        return False, "Invalid response."
+
     conn = db()
     offer = conn.execute(
         """
@@ -1061,10 +1073,7 @@ def resolve_offer(token: str, response: str) -> tuple[bool, str]:
         conn.close()
         return False, "Invalid or unknown offer link."
 
-    if offer["responded_at"] is not None:
-        conn.close()
-        return False, f"This offer was already responded to ({offer['response']})."
-
+    # Always overwrite the response (even if already responded before)
     conn.execute(
         """
         UPDATE offers
@@ -1290,26 +1299,42 @@ def render_my_offers_page() -> bool:
             st.subheader(title)
             st.caption(subtitle)
 
-            if o["responded_at"]:
-                st.success(f"Response recorded: {o['response']}")
-            else:
-                c1, c2 = st.columns(2)
+            # Show current status (if any), but DO NOT lock the UI
+            current_resp = (o["response"] or "").strip().upper()
+            if o["responded_at"] and current_resp:
+                if current_resp == "DECLINED":
+                    st.markdown(
+                        "<div style='font-weight:700;color:#c62828;'>Response recorded: DECLINED</div>",
+                        unsafe_allow_html=True,
+                    )
+                elif current_resp == "ACCEPTED":
+                    st.markdown(
+                        "<div style='font-weight:700;color:#2e7d32;'>Response recorded: ACCEPTED</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.info(f"Response recorded: {current_resp}")
 
-                if c1.button("Accept", key=f"portal_acc_{o['token']}"):
-                    ok, msg = resolve_offer(o["token"], "ACCEPTED")
-                    if ok:
-                        st.success("Accepted. Thank you.")
-                    else:
-                        st.error(msg)
-                    st.rerun()
+                st.caption("You can change your response below if needed.")
 
-                if c2.button("Decline", key=f"portal_dec_{o['token']}"):
-                    ok, msg = resolve_offer(o["token"], "DECLINED")
-                    if ok:
-                        st.success("Declined. Thank you.")
-                    else:
-                        st.error(msg)
-                    st.rerun()
+            c1, c2 = st.columns(2)
+
+            if c1.button("Accept", key=f"portal_acc_{o['token']}"):
+                ok, msg = resolve_offer(o["token"], "ACCEPTED")
+                if ok:
+                    st.success("Accepted. Thank you.")
+                else:
+                    st.error(msg)
+                st.rerun()
+
+            if c2.button("Decline", key=f"portal_dec_{o['token']}"):
+                ok, msg = resolve_offer(o["token"], "DECLINED")
+                if ok:
+                    st.success("Declined. Thank you.")
+                else:
+                    st.error(msg)
+                st.rerun()
+
 
     return True
 
