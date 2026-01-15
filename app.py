@@ -6,7 +6,6 @@ from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from email.utils import make_msgid, formatdate
 
 import pandas as pd
 import streamlit as st
@@ -18,22 +17,21 @@ from streamlit_autorefresh import st_autorefresh
 # ============================================================
 BASE_DIR = Path(__file__).resolve().parent
 
-# Production: set DB_PATH in Render Environment to your persistent disk path.
-# Local: falls back to ./league.db next to app.py
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "league.db"))
 Path(DB_PATH).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
-LEAGUE_TZ = "Pacific/Auckland"
-
-# Feature flag for referee portal
-REF_PORTAL_ENABLED = os.getenv("REF_PORTAL_ENABLED", "false").lower() == "true"
+REF_PORTAL_ENABLED = os.getenv("REF_PORTAL_ENABLED", "false").strip().lower() == "true"
 
 st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
 
 
 # ============================================================
-# UI helpers
+# GENERAL HELPERS
 # ============================================================
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def status_badge(text: str, bg: str, fg: str = "white"):
     st.markdown(
         f"""
@@ -54,12 +52,8 @@ def status_badge(text: str, bg: str, fg: str = "white"):
 
 
 # ============================================================
-# DB
+# DATABASE
 # ============================================================
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
 def db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -183,94 +177,18 @@ def init_db():
 
 
 # ============================================================
-# Offer helpers
-# ============================================================
-def create_offer(assignment_id: int) -> str:
-    token = secrets.token_urlsafe(24)
-    conn = db()
-    conn.execute(
-        """
-        INSERT INTO offers(assignment_id, token, created_at)
-        VALUES (?, ?, ?)
-        """,
-        (assignment_id, token, now_iso()),
-    )
-    conn.commit()
-    conn.close()
-    return token
-
-
-def delete_offer_by_token(token: str):
-    conn = db()
-    conn.execute("DELETE FROM offers WHERE token=?", (token,))
-    conn.commit()
-    conn.close()
-
-
-def get_offer_token_for_assignment(assignment_id: int) -> str | None:
-    conn = db()
-    row = conn.execute(
-        "SELECT token FROM offers WHERE assignment_id=? ORDER BY id DESC LIMIT 1",
-        (assignment_id,),
-    ).fetchone()
-    conn.close()
-    return row["token"] if row else None
-
-
-def resolve_offer(token: str, response: str) -> tuple[bool, str]:
-    conn = db()
-    offer = conn.execute(
-        """
-        SELECT id, assignment_id, responded_at, response
-        FROM offers
-        WHERE token=?
-        """,
-        (token,),
-    ).fetchone()
-
-    if not offer:
-        conn.close()
-        return False, "Invalid or unknown offer link."
-
-    if offer["responded_at"] is not None:
-        conn.close()
-        return False, f"This offer was already responded to ({offer['response']})."
-
-    conn.execute(
-        """
-        UPDATE offers
-        SET responded_at=?, response=?
-        WHERE id=?
-        """,
-        (now_iso(), response, offer["id"]),
-    )
-
-    new_status = "ACCEPTED" if response == "ACCEPTED" else "DECLINED"
-    conn.execute(
-        """
-        UPDATE assignments
-        SET status=?, updated_at=?
-        WHERE id=?
-        """,
-        (new_status, now_iso(), offer["assignment_id"]),
-    )
-
-    conn.commit()
-    conn.close()
-    return True, f"Thanks — you have {response.lower()} the offer."
-
-
-# ============================================================
-# Email (SMTP)
+# SMTP / EMAIL
 # ============================================================
 def smtp_settings():
-    # Env vars (Render) take priority; secrets.toml (local) is fallback.
+    """
+    Env vars (Render) take priority.
+    secrets.toml (local) is optional fallback.
+    """
     secrets_dict = {}
-
     secrets_paths = [
         "/opt/render/.streamlit/secrets.toml",
         "/opt/render/project/src/.streamlit/secrets.toml",
-        str(BASE_DIR / ".streamlit" / "secrets.toml"),  # local dev
+        str(BASE_DIR / ".streamlit" / "secrets.toml"),
     ]
     if any(os.path.exists(p) for p in secrets_paths):
         try:
@@ -279,7 +197,7 @@ def smtp_settings():
             secrets_dict = {}
 
     def get(key: str, default: str = "") -> str:
-        return os.environ.get(key, str(secrets_dict.get(key, default)))
+        return os.environ.get(key, str(secrets_dict.get(key, default))).strip()
 
     return {
         "host": get("SMTP_HOST", ""),
@@ -300,8 +218,7 @@ def send_html_email(
     text_body: str | None = None,
 ):
     """
-    Multipart/alternative: always include text/plain + text/html (helps deliverability).
-    Adds Message-ID + Date headers.
+    Multipart/alternative: includes text/plain + text/html (helps deliverability).
     """
     cfg = smtp_settings()
     if not (cfg["host"] and cfg["user"] and cfg["password"] and cfg["from_email"] and cfg["app_base_url"]):
@@ -314,125 +231,20 @@ def send_html_email(
     msg["Subject"] = subject
     msg["From"] = f'{cfg["from_name"]} <{cfg["from_email"]}>'
     msg["To"] = f"{to_name} <{to_email}>"
-    msg["Date"] = formatdate(localtime=False)
-    msg["Message-ID"] = make_msgid(domain=cfg["from_email"].split("@")[-1])
 
     if not text_body:
         text_body = "You have a notification from Referee Allocator."
-    msg.attach(MIMEText(text_body, "plain", "utf-8"))
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
 
-    with smtplib.SMTP(cfg["host"], cfg["port"], timeout=20) as server:
-        server.ehlo()
+    with smtplib.SMTP(cfg["host"], cfg["port"]) as server:
         server.starttls()
-        server.ehlo()
         server.login(cfg["user"], cfg["password"])
         server.sendmail(cfg["from_email"], [to_email], msg.as_string())
 
 
-def send_offer_email_and_mark_offered(
-    assignment_id: int,
-    referee_name: str,
-    referee_email: str,
-    game_row,
-    start_dt: datetime,
-    msg_key: str,
-):
-    """
-    Creates an offer token, emails referee (portal-first if enabled), marks assignment OFFERED.
-    If email fails, offer token is deleted and assignment is NOT marked OFFERED.
-    Also adds a visible fallback portal link in the Admin UI message.
-    """
-    cfg = smtp_settings()
-    base = cfg.get("app_base_url", "").rstrip("/")
-    if not base:
-        raise RuntimeError("APP_BASE_URL is missing. Set it in Render Environment Variables.")
-
-    token = create_offer(assignment_id)
-
-    game_line = f"{game_row['home_team']} vs {game_row['away_team']}"
-    when_line = start_dt.strftime("%Y-%m-%d %H:%M")
-
-    subject = f"{referee_name} — Match assignment: {game_row['home_team']} vs {game_row['away_team']}"
-
-    try:
-        if REF_PORTAL_ENABLED:
-            portal_url = f"{base}/?offer_token={token}"
-
-            text = (
-                f"Hi {referee_name},\n\n"
-                f"You have a match assignment offer:\n"
-                f"- Game: {game_line}\n"
-                f"- Field: {game_row['field_name']}\n"
-                f"- Start: {when_line}\n\n"
-                f"View and respond here:\n{portal_url}\n"
-            )
-
-            html = f"""
-            <div style="font-family: Arial, sans-serif; line-height:1.4;">
-              <p>Hi {referee_name},</p>
-              <p>You have a match assignment offer:</p>
-              <ul>
-                <li><b>Game:</b> {game_line}</li>
-                <li><b>Field:</b> {game_row['field_name']}</li>
-                <li><b>Start:</b> {when_line}</li>
-              </ul>
-              <p>
-                <a href="{portal_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
-                  View offer
-                </a>
-              </p>
-              <p style="color:#666;font-size:12px;">If the button doesn’t work, copy and paste this link:<br>{portal_url}</p>
-            </div>
-            """
-            send_html_email(referee_email, referee_name, subject, html, text_body=text)
-
-            set_assignment_status(assignment_id, "OFFERED")
-            st.session_state[msg_key] = "Offer emailed successfully and marked as OFFERED."
-
-            st.session_state[msg_key] += f"\n\nFallback link (copy/paste): {portal_url}"
-
-        else:
-            accept_url = f"{base}/?action=accept&token={token}"
-            decline_url = f"{base}/?action=decline&token={token}"
-
-            text = (
-                f"Hi {referee_name},\n\n"
-                f"You have a referee assignment offer:\n"
-                f"- Game: {game_line}\n"
-                f"- Field: {game_row['field_name']}\n"
-                f"- Start: {when_line}\n\n"
-                f"Accept: {accept_url}\n"
-                f"Decline: {decline_url}\n"
-            )
-
-            html = f"""
-            <div style="font-family: Arial, sans-serif; line-height:1.4;">
-              <p>Hi {referee_name},</p>
-              <p>You have been offered a referee assignment:</p>
-              <ul>
-                <li><b>Game:</b> {game_line}</li>
-                <li><b>Field:</b> {game_row['field_name']}</li>
-                <li><b>Start:</b> {when_line}</li>
-              </ul>
-              <p>
-                <a href="{accept_url}">ACCEPT</a> |
-                <a href="{decline_url}">DECLINE</a>
-              </p>
-            </div>
-            """
-            send_html_email(referee_email, referee_name, subject, html, text_body=text)
-
-            set_assignment_status(assignment_id, "OFFERED")
-            st.session_state[msg_key] = "Offer emailed successfully and marked as OFFERED."
-
-    except Exception as e:
-        delete_offer_by_token(token)
-        raise RuntimeError(f"Email failed — offer not created: {e}") from e
-
-
 # ============================================================
-# Admin auth helpers
+# ADMIN AUTH (MAGIC LINK)
 # ============================================================
 def is_admin_email_allowed(email: str) -> bool:
     conn = db()
@@ -502,6 +314,40 @@ def create_admin_login_token(email: str, minutes_valid: int = 15) -> str:
     return token
 
 
+def consume_admin_token(token: str) -> tuple[bool, str]:
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT id, email, expires_at, used_at
+        FROM admin_tokens
+        WHERE token=?
+        """,
+        (token,),
+    ).fetchone()
+
+    if not row:
+        conn.close()
+        return False, "Invalid or unknown login link."
+
+    if row["used_at"] is not None:
+        conn.close()
+        return False, "This login link has already been used."
+
+    if datetime.now(timezone.utc) > dtparser.parse(row["expires_at"]):
+        conn.close()
+        return False, "This login link has expired. Please request a new one."
+
+    email = row["email"].strip().lower()
+    if not is_admin_email_allowed(email):
+        conn.close()
+        return False, "This email is not an authorised administrator."
+
+    conn.execute("UPDATE admin_tokens SET used_at=? WHERE id=?", (now_iso(), row["id"]))
+    conn.commit()
+    conn.close()
+    return True, email
+
+
 def create_admin_session(email: str, days_valid: int = 14) -> str:
     token = secrets.token_urlsafe(32)
     created = datetime.now(timezone.utc)
@@ -558,64 +404,16 @@ def consume_admin_session(token: str) -> tuple[bool, str]:
     return True, email
 
 
-def maybe_restore_admin_from_session_param():
-    qp = st.query_params
-    token = qp.get("session")
-    if token and not st.session_state.get("admin_email"):
-        ok, value = consume_admin_session(token)
-        if ok:
-            st.session_state["admin_email"] = value
-        else:
-            st.query_params.clear()
-
-
-def consume_admin_token(token: str) -> tuple[bool, str]:
-    conn = db()
-    row = conn.execute(
-        """
-        SELECT id, email, expires_at, used_at
-        FROM admin_tokens
-        WHERE token=?
-        """,
-        (token,),
-    ).fetchone()
-
-    if not row:
-        conn.close()
-        return False, "Invalid or unknown login link."
-
-    if row["used_at"] is not None:
-        conn.close()
-        return False, "This login link has already been used."
-
-    expires_at = dtparser.parse(row["expires_at"])
-    if datetime.now(timezone.utc) > expires_at:
-        conn.close()
-        return False, "This login link has expired. Please request a new one."
-
-    email = row["email"].strip().lower()
-    if not is_admin_email_allowed(email):
-        conn.close()
-        return False, "This email is not an authorised administrator."
-
-    conn.execute("UPDATE admin_tokens SET used_at=? WHERE id=?", (now_iso(), row["id"]))
-    conn.commit()
-    conn.close()
-    return True, email
-
-
 def send_admin_login_email(email: str) -> str:
     email = email.strip().lower()
     cfg = smtp_settings()
     base = cfg.get("app_base_url", "").rstrip("/")
+
     token = create_admin_login_token(email)
     login_url = f"{base}/?admin_login=1&token={token}"
 
     subject = "Admin login link"
-    text = (
-        "Use this link to sign in as an administrator (expires in 15 minutes):\n"
-        f"{login_url}\n"
-    )
+    text = f"Use this link to sign in (expires in 15 minutes):\n{login_url}\n"
     html = f"""
     <div style="font-family: Arial, sans-serif; line-height: 1.4;">
       <p>Hi,</p>
@@ -625,8 +423,7 @@ def send_admin_login_email(email: str) -> str:
           Sign in
         </a>
       </p>
-      <p style="color:#666;font-size:12px;">If the button doesn’t work, copy and paste this link:<br>{login_url}</p>
-      <p>If you didn’t request this, you can ignore this email.</p>
+      <p style="color:#666;font-size:12px;">If the button doesn’t work, copy/paste:<br>{login_url}</p>
     </div>
     """
     send_html_email(email, email, subject, html, text_body=text)
@@ -651,12 +448,23 @@ def handle_admin_login_via_query_params():
             st.stop()
 
 
+def maybe_restore_admin_from_session_param():
+    qp = st.query_params
+    token = qp.get("session")
+    if token and not st.session_state.get("admin_email"):
+        ok, value = consume_admin_session(token)
+        if ok:
+            st.session_state["admin_email"] = value
+        else:
+            st.query_params.clear()
+
+
 def admin_logout_button():
     if st.session_state.get("admin_email"):
-        col1, col2 = st.columns([3, 1])
-        with col1:
+        c1, c2 = st.columns([3, 1])
+        with c1:
             st.caption(f"Logged in as: {st.session_state['admin_email']}")
-        with col2:
+        with c2:
             if st.button("Log out"):
                 st.session_state.pop("admin_email", None)
                 st.query_params.clear()
@@ -664,7 +472,7 @@ def admin_logout_button():
 
 
 # ============================================================
-# CSV Import helpers
+# IMPORT HELPERS
 # ============================================================
 def import_referees_csv(df: pd.DataFrame):
     cols = {c.lower().strip(): c for c in df.columns}
@@ -673,8 +481,7 @@ def import_referees_csv(df: pd.DataFrame):
 
     conn = db()
     cur = conn.cursor()
-    added = 0
-    updated = 0
+    added, updated = 0, 0
 
     for _, row in df.iterrows():
         name = str(row[cols["name"]]).strip()
@@ -710,8 +517,8 @@ def replace_referees_csv(df: pd.DataFrame):
             continue
         new_refs.append((name, email))
 
-    if len(new_refs) == 0:
-        raise ValueError("Referees CSV has no valid rows. Aborting replace import (nothing deleted).")
+    if not new_refs:
+        raise ValueError("Referees CSV has no valid rows. Aborting replace import.")
 
     conn = db()
     cur = conn.cursor()
@@ -719,28 +526,14 @@ def replace_referees_csv(df: pd.DataFrame):
     try:
         cur.execute("BEGIN")
         cur.execute("DELETE FROM offers")
-
-        cur.execute(
-            """
-            UPDATE assignments
-            SET referee_id=NULL, status='EMPTY', updated_at=?
-            """,
-            (now_iso(),),
-        )
-
+        cur.execute("UPDATE assignments SET referee_id=NULL, status='EMPTY', updated_at=?", (now_iso(),))
         cur.execute("DELETE FROM blackouts")
         cur.execute("DELETE FROM referees")
-
         try:
             cur.execute("DELETE FROM sqlite_sequence WHERE name IN ('referees','blackouts','offers')")
         except Exception:
             pass
-
-        cur.executemany(
-            "INSERT INTO referees(name, email, active) VALUES (?, ?, 1)",
-            new_refs,
-        )
-
+        cur.executemany("INSERT INTO referees(name, email, active) VALUES (?, ?, 1)", new_refs)
         conn.commit()
         return len(new_refs)
     except Exception:
@@ -774,7 +567,6 @@ def import_games_csv(df: pd.DataFrame):
 
     conn = db()
     cur = conn.cursor()
-
     inserted, updated = 0, 0
 
     for _, row in df.iterrows():
@@ -792,8 +584,7 @@ def import_games_csv(df: pd.DataFrame):
                 t_raw = str(row[cols["start_time"]]).strip()
                 start_dt = dtparser.parse(f"{d_raw} {t_raw}")
             else:
-                start_raw = str(row[cols["start_datetime"]]).strip()
-                start_dt = dtparser.parse(start_raw)
+                start_dt = dtparser.parse(str(row[cols["start_datetime"]]).strip())
         except Exception as e:
             raise ValueError(f"Could not parse date/time for game_id={game_key}: {e}")
 
@@ -825,10 +616,7 @@ def import_games_csv(df: pd.DataFrame):
             game_id = cur.lastrowid
 
         for slot in (1, 2):
-            cur.execute(
-                "SELECT 1 FROM assignments WHERE game_id=? AND slot_no=?",
-                (game_id, slot),
-            )
+            cur.execute("SELECT 1 FROM assignments WHERE game_id=? AND slot_no=?", (game_id, slot))
             if not cur.fetchone():
                 cur.execute(
                     """
@@ -850,8 +638,8 @@ def import_blackouts_csv(df: pd.DataFrame):
 
     conn = db()
     cur = conn.cursor()
-
     added, skipped = 0, 0
+
     for _, row in df.iterrows():
         email = str(row[cols["email"]]).strip().lower()
         d_raw = str(row[cols["blackout_date"]]).strip()
@@ -870,10 +658,7 @@ def import_blackouts_csv(df: pd.DataFrame):
             raise ValueError(f"Could not parse blackout_date '{d_raw}' for {email}")
 
         try:
-            cur.execute(
-                "INSERT INTO blackouts(referee_id, blackout_date) VALUES (?, ?)",
-                (r["id"], d.isoformat()),
-            )
+            cur.execute("INSERT INTO blackouts(referee_id, blackout_date) VALUES (?, ?)", (r["id"], d.isoformat()))
             added += 1
         except sqlite3.IntegrityError:
             pass
@@ -884,7 +669,7 @@ def import_blackouts_csv(df: pd.DataFrame):
 
 
 # ============================================================
-# Data helpers
+# DATA QUERIES / MUTATIONS
 # ============================================================
 def get_games():
     conn = db()
@@ -961,18 +746,13 @@ def get_assignment_live(assignment_id: int):
 
 
 def game_local_date(game_row):
-    start = dtparser.parse(game_row["start_dt"])
-    return start.date()
+    return dtparser.parse(game_row["start_dt"]).date()
 
 
 def referee_has_blackout(ref_id: int, d: date) -> bool:
     conn = db()
     row = conn.execute(
-        """
-        SELECT 1 FROM blackouts
-        WHERE referee_id=? AND blackout_date=?
-        LIMIT 1
-        """,
+        "SELECT 1 FROM blackouts WHERE referee_id=? AND blackout_date=? LIMIT 1",
         (ref_id, d.isoformat()),
     ).fetchone()
     conn.close()
@@ -998,11 +778,7 @@ def set_assignment_ref(assignment_id: int, ref_id: int | None):
 def set_assignment_status(assignment_id: int, status: str):
     conn = db()
     conn.execute(
-        """
-        UPDATE assignments
-        SET status=?, updated_at=?
-        WHERE id=?
-        """,
+        "UPDATE assignments SET status=?, updated_at=? WHERE id=?",
         (status, now_iso(), assignment_id),
     )
     conn.commit()
@@ -1012,13 +788,7 @@ def set_assignment_status(assignment_id: int, status: str):
 def clear_assignment(assignment_id: int):
     conn = db()
     conn.execute(
-        """
-        UPDATE assignments
-        SET referee_id=NULL,
-            status='EMPTY',
-            updated_at=?
-        WHERE id=?
-        """,
+        "UPDATE assignments SET referee_id=NULL, status='EMPTY', updated_at=? WHERE id=?",
         (now_iso(), assignment_id),
     )
     conn.execute("DELETE FROM offers WHERE assignment_id=?", (assignment_id,))
@@ -1026,8 +796,61 @@ def clear_assignment(assignment_id: int):
     conn.close()
 
 
+def create_offer(assignment_id: int) -> str:
+    token = secrets.token_urlsafe(24)
+    conn = db()
+    conn.execute(
+        "INSERT INTO offers(assignment_id, token, created_at) VALUES (?, ?, ?)",
+        (assignment_id, token, now_iso()),
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def get_offer_token_for_assignment(assignment_id: int) -> str | None:
+    conn = db()
+    row = conn.execute(
+        "SELECT token FROM offers WHERE assignment_id=? ORDER BY id DESC LIMIT 1",
+        (assignment_id,),
+    ).fetchone()
+    conn.close()
+    return row["token"] if row else None
+
+
+def resolve_offer(token: str, response: str) -> tuple[bool, str]:
+    conn = db()
+    offer = conn.execute(
+        "SELECT id, assignment_id, responded_at, response FROM offers WHERE token=?",
+        (token,),
+    ).fetchone()
+
+    if not offer:
+        conn.close()
+        return False, "Invalid or unknown offer link."
+
+    if offer["responded_at"] is not None:
+        conn.close()
+        return False, f"This offer was already responded to ({offer['response']})."
+
+    conn.execute(
+        "UPDATE offers SET responded_at=?, response=? WHERE id=?",
+        (now_iso(), response, offer["id"]),
+    )
+
+    new_status = "ACCEPTED" if response == "ACCEPTED" else "DECLINED"
+    conn.execute(
+        "UPDATE assignments SET status=?, updated_at=? WHERE id=?",
+        (new_status, now_iso(), offer["assignment_id"]),
+    )
+
+    conn.commit()
+    conn.close()
+    return True, f"Thanks — you have {response.lower()} the offer."
+
+
 # ============================================================
-# Referee portal (My Offers)
+# REFEREE PORTAL (MY OFFERS)
 # ============================================================
 def get_offer_details_by_token(token: str):
     conn = db()
@@ -1114,7 +937,6 @@ def maybe_handle_referee_portal_login():
     st.session_state["referee_id"] = int(offer["referee_id"])
     st.session_state["referee_name"] = offer["ref_name"] or "Referee"
     st.session_state["referee_email"] = offer["ref_email"] or ""
-
     st.query_params.clear()
     st.rerun()
 
@@ -1166,54 +988,132 @@ def render_my_offers_page() -> bool:
                 c1, c2 = st.columns(2)
                 if c1.button("Accept", key=f"portal_acc_{o['token']}"):
                     ok, msg = resolve_offer(o["token"], "ACCEPTED")
-                    if ok:
-                        st.success("Accepted. Thank you.")
-                    else:
-                        st.error(msg)
+                    st.success("Accepted. Thank you.") if ok else st.error(msg)
                     st.rerun()
 
                 if c2.button("Decline", key=f"portal_dec_{o['token']}"):
                     ok, msg = resolve_offer(o["token"], "DECLINED")
-                    if ok:
-                        st.success("Declined. Thank you.")
-                    else:
-                        st.error(msg)
+                    st.success("Declined. Thank you.") if ok else st.error(msg)
                     st.rerun()
 
     return True
 
 
 # ============================================================
-# Public offer handler (legacy accept/decline links)
+# PUBLIC OFFER HANDLER (LEGACY accept/decline LINKS)
 # ============================================================
 def maybe_handle_offer_response():
     qp = st.query_params
     token = qp.get("token")
     action = qp.get("action")
+
     if token and action in ("accept", "decline"):
         response = "ACCEPTED" if action == "accept" else "DECLINED"
         ok, msg = resolve_offer(token, response)
         st.title("Referee Response")
-        if ok:
-            st.success(msg)
-        else:
-            st.error(msg)
+        st.success(msg) if ok else st.error(msg)
         st.info("You can close this page now.")
         st.stop()
 
 
 # ============================================================
-# APP START
+# OFFER EMAIL COMPOSER/SENDER
+# ============================================================
+def send_offer_email_and_mark_offered(
+    assignment_id: int,
+    referee_name: str,
+    referee_email: str,
+    game,
+    start_dt,
+    msg_key: str,
+):
+    token = create_offer(assignment_id)
+    cfg = smtp_settings()
+    base = cfg.get("app_base_url", "").rstrip("/")
+
+    game_line = f"{game['home_team']} vs {game['away_team']}"
+    when_line = start_dt.strftime("%Y-%m-%d %H:%M")
+    subject = f"{referee_name} — Match assignment: {game_line}"
+
+    if REF_PORTAL_ENABLED:
+        portal_url = f"{base}/?offer_token={token}"
+        text = (
+            f"Hi {referee_name},\n\n"
+            f"You have a match assignment offer:\n"
+            f"- Game: {game_line}\n"
+            f"- Field: {game['field_name']}\n"
+            f"- Start: {when_line}\n\n"
+            f"View and respond here:\n{portal_url}\n"
+        )
+        html = f"""
+        <div style="font-family: Arial, sans-serif; line-height:1.4;">
+          <p>Hi {referee_name},</p>
+          <p>You have a match assignment offer:</p>
+          <ul>
+            <li><b>Game:</b> {game_line}</li>
+            <li><b>Field:</b> {game['field_name']}</li>
+            <li><b>Start:</b> {when_line}</li>
+          </ul>
+          <p>
+            <a href="{portal_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
+              View offer
+            </a>
+          </p>
+          <p style="color:#666;font-size:12px;">If the button doesn’t work, copy/paste:<br>{portal_url}</p>
+        </div>
+        """
+        send_html_email(referee_email, referee_name, subject, html, text_body=text)
+    else:
+        accept_url = f"{base}/?action=accept&token={token}"
+        decline_url = f"{base}/?action=decline&token={token}"
+        text = (
+            f"Hi {referee_name},\n\n"
+            f"You have a referee assignment offer:\n"
+            f"- Game: {game_line}\n"
+            f"- Field: {game['field_name']}\n"
+            f"- Start: {when_line}\n\n"
+            f"Accept: {accept_url}\n"
+            f"Decline: {decline_url}\n"
+        )
+        html = f"""
+        <div style="font-family: Arial, sans-serif; line-height:1.4;">
+          <p>Hi {referee_name},</p>
+          <p>You have been offered a referee assignment:</p>
+          <ul>
+            <li><b>Game:</b> {game_line}</li>
+            <li><b>Field:</b> {game['field_name']}</li>
+            <li><b>Start:</b> {when_line}</li>
+          </ul>
+          <p>
+            <a href="{accept_url}">ACCEPT</a> |
+            <a href="{decline_url}">DECLINE</a>
+          </p>
+        </div>
+        """
+        send_html_email(referee_email, referee_name, subject, html, text_body=text)
+
+    set_assignment_status(assignment_id, "OFFERED")
+    st.session_state[msg_key] = "Offer emailed successfully and marked as OFFERED."
+
+    # Always show fallback portal link (even if email arrives)
+    offer_token = get_offer_token_for_assignment(assignment_id)
+    if offer_token:
+        portal_url = f"{base}/?offer_token={offer_token}"
+        st.session_state[msg_key] += f"\n\nFallback link (copy/paste): {portal_url}"
+
+
+# ============================================================
+# APP STARTUP ROUTING
 # ============================================================
 init_db()
 
-# Referee portal: allow login before admin login
+# Referee portal login must be handled before admin login
 maybe_handle_referee_portal_login()
 
-# Legacy accept/decline links still supported
+# Legacy accept/decline links
 maybe_handle_offer_response()
 
-# If referee is logged in, show portal and stop (no admin UI)
+# If referee logged in, show portal and stop
 if render_my_offers_page():
     st.stop()
 
@@ -1221,6 +1121,9 @@ if render_my_offers_page():
 handle_admin_login_via_query_params()
 maybe_restore_admin_from_session_param()
 
+# ============================================================
+# MAIN ADMIN APP
+# ============================================================
 st.title("Referee Allocator — MVP")
 st.caption(f"Database file: {DB_PATH}")
 
@@ -1257,13 +1160,12 @@ if not st.session_state.get("admin_email"):
                 st.error(str(e))
     st.stop()
 
-# Logged in view
 admin_logout_button()
 
 tabs = st.tabs(["Admin", "Import", "Blackouts", "Administrators"])
 
 # ============================================================
-# Administrators tab
+# ADMINISTRATORS TAB
 # ============================================================
 with tabs[3]:
     st.subheader("Administrators (allowlist)")
@@ -1301,14 +1203,13 @@ with tabs[3]:
         st.info("No active admins found (you should add at least one).")
 
 # ============================================================
-# Import tab
+# IMPORT TAB
 # ============================================================
 with tabs[1]:
     st.subheader("Import CSVs")
 
     st.markdown("### Games CSV")
     st.caption("Required columns: game_id, date, start_time, home_team, away_team, field")
-
     games_file = st.file_uploader("Upload Games CSV", type=["csv"], key="games_csv")
     if games_file:
         df_games = pd.read_csv(games_file)
@@ -1322,26 +1223,16 @@ with tabs[1]:
 
     st.markdown("### Referees CSV")
     st.caption("Required columns: name, email")
-
-    replace_mode = st.checkbox(
-        "Replace ALL referees with this CSV (overwrite existing list)",
-        value=False,
-        key="replace_refs_mode",
-    )
-
+    replace_mode = st.checkbox("Replace ALL referees with this CSV (overwrite existing list)", value=False, key="replace_refs_mode")
     refs_file = st.file_uploader("Upload Referees CSV", type=["csv"], key="refs_csv")
     if refs_file:
         df_refs = pd.read_csv(refs_file)
         st.dataframe(df_refs.head(20), use_container_width=True)
-
         if st.button("Import Referees", key="import_refs_btn"):
             try:
                 if replace_mode:
                     count = replace_referees_csv(df_refs)
-                    st.success(
-                        f"Replaced referee list successfully. Imported {count} referee(s). "
-                        "All assignments were reset to EMPTY."
-                    )
+                    st.success(f"Replaced referee list successfully. Imported {count} referee(s). All assignments reset to EMPTY.")
                     for k in [k for k in st.session_state.keys() if str(k).startswith("refpick_")]:
                         st.session_state.pop(k, None)
                 else:
@@ -1355,7 +1246,6 @@ with tabs[1]:
 
     st.markdown("### Blackouts CSV (optional)")
     st.caption("Required columns: email, blackout_date")
-
     bl_file = st.file_uploader("Upload Blackouts CSV", type=["csv"], key="bl_csv")
     if bl_file:
         df_bl = pd.read_csv(bl_file)
@@ -1366,7 +1256,7 @@ with tabs[1]:
             st.rerun()
 
 # ============================================================
-# Blackouts tab
+# BLACKOUTS TAB
 # ============================================================
 with tabs[2]:
     st.subheader("Manage Blackout Dates (date-only)")
@@ -1383,10 +1273,7 @@ with tabs[2]:
         if st.button("Add date", key="blackout_add_btn"):
             conn = db()
             try:
-                conn.execute(
-                    "INSERT INTO blackouts(referee_id, blackout_date) VALUES (?, ?)",
-                    (ref_id, add_date.isoformat()),
-                )
+                conn.execute("INSERT INTO blackouts(referee_id, blackout_date) VALUES (?, ?)", (ref_id, add_date.isoformat()))
                 conn.commit()
                 st.success("Added blackout date.")
             except sqlite3.IntegrityError:
@@ -1397,11 +1284,7 @@ with tabs[2]:
         st.markdown("### Current blackout dates")
         conn = db()
         rows = conn.execute(
-            """
-            SELECT blackout_date FROM blackouts
-            WHERE referee_id=?
-            ORDER BY blackout_date ASC
-            """,
+            "SELECT blackout_date FROM blackouts WHERE referee_id=? ORDER BY blackout_date ASC",
             (ref_id,),
         ).fetchall()
         conn.close()
@@ -1411,10 +1294,7 @@ with tabs[2]:
             del_date = st.selectbox("Remove blackout date", dates, key="blackout_del_select")
             if st.button("Remove selected date", key="blackout_del_btn"):
                 conn = db()
-                conn.execute(
-                    "DELETE FROM blackouts WHERE referee_id=? AND blackout_date=?",
-                    (ref_id, del_date),
-                )
+                conn.execute("DELETE FROM blackouts WHERE referee_id=? AND blackout_date=?", (ref_id, del_date))
                 conn.commit()
                 conn.close()
                 st.success("Removed.")
@@ -1423,7 +1303,7 @@ with tabs[2]:
             st.caption("No blackout dates set.")
 
 # ============================================================
-# Admin tab
+# ADMIN TAB
 # ============================================================
 with tabs[0]:
     st.subheader("Games & Assignments")
@@ -1550,7 +1430,7 @@ with tabs[0]:
 
                     def on_action_change(
                         assignment_id=a["id"],
-                        g=g,
+                        game=g,
                         status=status,
                         blackout=blackout,
                         start_dt=start_dt,
@@ -1598,12 +1478,12 @@ with tabs[0]:
                                     assignment_id=assignment_id,
                                     referee_name=live_ref_name,
                                     referee_email=live_ref_email,
-                                    game_row=g,
+                                    game=game,
                                     start_dt=start_dt,
                                     msg_key=msg_key,
                                 )
                             except Exception as e:
-                                st.session_state[msg_key] = str(e)
+                                st.session_state[msg_key] = f"Offer failed: {e}"
 
                         elif choice == "ASSIGN":
                             set_assignment_status(assignment_id, "ASSIGNED")
@@ -1617,12 +1497,7 @@ with tabs[0]:
                         st.session_state[action_key] = "—"
                         st.rerun()
 
-                    st.selectbox(
-                        "Action",
-                        action_options,
-                        key=action_key,
-                        on_change=on_action_change,
-                    )
+                    st.selectbox("Action", action_options, key=action_key, on_change=on_action_change)
 
                     if st.session_state.get(msg_key):
                         st.info(st.session_state[msg_key])
