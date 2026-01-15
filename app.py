@@ -6,7 +6,7 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-
+from datetime import date
 
 def get_admin_print_rows_for_date(selected_date: date):
     """
