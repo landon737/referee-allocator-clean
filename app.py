@@ -20,17 +20,18 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "league.db"))
 Path(DB_PATH).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
-LEAGUE_TZ = "Pacific/Auckland"
-
-# Feature flag for referee portal
 REF_PORTAL_ENABLED = os.getenv("REF_PORTAL_ENABLED", "false").lower() == "true"
 
 st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
 
 
 # ============================================================
-# UI helpers
+# Small utilities
 # ============================================================
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def status_badge(text: str, bg: str, fg: str = "white"):
     st.markdown(
         f"""
@@ -42,8 +43,8 @@ def status_badge(text: str, bg: str, fg: str = "white"):
             color:{fg};
             font-weight:700;
             font-size:14px;
-            ">
-            {text}
+        ">
+        {text}
         </div>
         """,
         unsafe_allow_html=True,
@@ -53,10 +54,6 @@ def status_badge(text: str, bg: str, fg: str = "white"):
 # ============================================================
 # DB
 # ============================================================
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
 def db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -137,6 +134,7 @@ def init_db():
         """
     )
 
+    # Admin allowlist + magic links
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS admins (
@@ -185,8 +183,9 @@ def smtp_settings():
     """
     Env vars (Render) take priority; secrets.toml (local) is fallback.
 
-    Required env vars for email:
-      SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL
+    Required:
+      SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD,
+      SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL
     """
     secrets_dict = {}
 
@@ -209,7 +208,7 @@ def smtp_settings():
         "port": int(get("SMTP_PORT", "587") or 587),
         "user": get("SMTP_USER", ""),
         "password": get("SMTP_PASSWORD", ""),
-        "from_email": get("SMTP_FROM_EMAIL", get("SMTP_USER", "")),
+        "from_email": get("SMTP_FROM_EMAIL", ""),
         "from_name": get("SMTP_FROM_NAME", "Referee Allocator"),
         "app_base_url": get("APP_BASE_URL", "").rstrip("/"),
     }
@@ -223,7 +222,7 @@ def send_html_email(
     text_body: str | None = None,
 ):
     """
-    Multipart/alternative: always include text/plain + text/html (helps deliverability).
+    Multipart/alternative: include text/plain + text/html (helps deliverability).
     """
     cfg = smtp_settings()
     if not (cfg["host"] and cfg["user"] and cfg["password"] and cfg["from_email"] and cfg["app_base_url"]):
@@ -249,18 +248,8 @@ def send_html_email(
 
 
 # ============================================================
-# Admin auth helpers
+# Admin auth
 # ============================================================
-def is_admin_email_allowed(email: str) -> bool:
-    conn = db()
-    row = conn.execute(
-        "SELECT 1 FROM admins WHERE email=? AND active=1 LIMIT 1",
-        (email.strip().lower(),),
-    ).fetchone()
-    conn.close()
-    return bool(row)
-
-
 def admin_count() -> int:
     conn = db()
     row = conn.execute("SELECT COUNT(*) AS c FROM admins").fetchone()
@@ -277,6 +266,16 @@ def add_admin(email: str):
     )
     conn.commit()
     conn.close()
+
+
+def is_admin_email_allowed(email: str) -> bool:
+    conn = db()
+    row = conn.execute(
+        "SELECT 1 FROM admins WHERE email=? AND active=1 LIMIT 1",
+        (email.strip().lower(),),
+    ).fetchone()
+    conn.close()
+    return bool(row)
 
 
 def set_admin_active(email: str, active: bool):
@@ -317,6 +316,41 @@ def create_admin_login_token(email: str, minutes_valid: int = 15) -> str:
     conn.commit()
     conn.close()
     return token
+
+
+def consume_admin_token(token: str) -> tuple[bool, str]:
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT id, email, expires_at, used_at
+        FROM admin_tokens
+        WHERE token=?
+        """,
+        (token,),
+    ).fetchone()
+
+    if not row:
+        conn.close()
+        return False, "Invalid or unknown login link."
+
+    if row["used_at"] is not None:
+        conn.close()
+        return False, "This login link has already been used."
+
+    expires_at = dtparser.parse(row["expires_at"])
+    if datetime.now(timezone.utc) > expires_at:
+        conn.close()
+        return False, "This login link has expired. Please request a new one."
+
+    email = row["email"].strip().lower()
+    if not is_admin_email_allowed(email):
+        conn.close()
+        return False, "This email is not an authorised administrator."
+
+    conn.execute("UPDATE admin_tokens SET used_at=? WHERE id=?", (now_iso(), row["id"]))
+    conn.commit()
+    conn.close()
+    return True, email
 
 
 def create_admin_session(email: str, days_valid: int = 14) -> str:
@@ -386,42 +420,11 @@ def maybe_restore_admin_from_session_param():
             st.query_params.clear()
 
 
-def consume_admin_token(token: str) -> tuple[bool, str]:
-    conn = db()
-    row = conn.execute(
-        """
-        SELECT id, email, expires_at, used_at
-        FROM admin_tokens
-        WHERE token=?
-        """,
-        (token,),
-    ).fetchone()
-
-    if not row:
-        conn.close()
-        return False, "Invalid or unknown login link."
-
-    if row["used_at"] is not None:
-        conn.close()
-        return False, "This login link has already been used."
-
-    expires_at = dtparser.parse(row["expires_at"])
-    if datetime.now(timezone.utc) > expires_at:
-        conn.close()
-        return False, "This login link has expired. Please request a new one."
-
-    email = row["email"].strip().lower()
-    if not is_admin_email_allowed(email):
-        conn.close()
-        return False, "This email is not an authorised administrator."
-
-    conn.execute("UPDATE admin_tokens SET used_at=? WHERE id=?", (now_iso(), row["id"]))
-    conn.commit()
-    conn.close()
-    return True, email
-
-
 def send_admin_login_email(email: str) -> str:
+    """
+    Sends the admin login email. We still return the URL (useful for debugging),
+    but we no longer display it in the UI.
+    """
     email = email.strip().lower()
     cfg = smtp_settings()
     base = cfg.get("app_base_url", "").rstrip("/")
@@ -469,10 +472,10 @@ def handle_admin_login_via_query_params():
 
 def admin_logout_button():
     if st.session_state.get("admin_email"):
-        col1, col2 = st.columns([3, 1])
-        with col1:
+        c1, c2 = st.columns([3, 1])
+        with c1:
             st.caption(f"Logged in as: {st.session_state['admin_email']}")
-        with col2:
+        with c2:
             if st.button("Log out"):
                 st.session_state.pop("admin_email", None)
                 st.query_params.clear()
@@ -480,7 +483,7 @@ def admin_logout_button():
 
 
 # ============================================================
-# CSV Import helpers
+# Imports & data helpers
 # ============================================================
 def import_referees_csv(df: pd.DataFrame):
     cols = {c.lower().strip(): c for c in df.columns}
@@ -531,11 +534,9 @@ def replace_referees_csv(df: pd.DataFrame):
 
     conn = db()
     cur = conn.cursor()
-
     try:
         cur.execute("BEGIN")
         cur.execute("DELETE FROM offers")
-
         cur.execute(
             """
             UPDATE assignments
@@ -543,7 +544,6 @@ def replace_referees_csv(df: pd.DataFrame):
             """,
             (now_iso(),),
         )
-
         cur.execute("DELETE FROM blackouts")
         cur.execute("DELETE FROM referees")
 
@@ -556,7 +556,6 @@ def replace_referees_csv(df: pd.DataFrame):
             "INSERT INTO referees(name, email, active) VALUES (?, ?, 1)",
             new_refs,
         )
-
         conn.commit()
         return len(new_refs)
     except Exception:
@@ -592,7 +591,6 @@ def import_games_csv(df: pd.DataFrame):
     cur = conn.cursor()
 
     inserted, updated = 0, 0
-
     for _, row in df.iterrows():
         game_key = str(row[key_col]).strip()
         home = str(row[cols["home_team"]]).strip()
@@ -699,9 +697,6 @@ def import_blackouts_csv(df: pd.DataFrame):
     return added, skipped
 
 
-# ============================================================
-# Data helpers
-# ============================================================
 def get_games():
     conn = db()
     rows = conn.execute(
@@ -842,6 +837,9 @@ def clear_assignment(assignment_id: int):
     conn.close()
 
 
+# ============================================================
+# Offers
+# ============================================================
 def create_offer(assignment_id: int) -> str:
     token = secrets.token_urlsafe(24)
     conn = db()
@@ -862,16 +860,6 @@ def delete_offer_by_token(token: str):
     conn.execute("DELETE FROM offers WHERE token=?", (token,))
     conn.commit()
     conn.close()
-
-
-def get_offer_token_for_assignment(assignment_id: int) -> str | None:
-    conn = db()
-    row = conn.execute(
-        "SELECT token FROM offers WHERE assignment_id=? ORDER BY id DESC LIMIT 1",
-        (assignment_id,),
-    ).fetchone()
-    conn.close()
-    return row["token"] if row else None
 
 
 def resolve_offer(token: str, response: str) -> tuple[bool, str]:
@@ -915,6 +903,76 @@ def resolve_offer(token: str, response: str) -> tuple[bool, str]:
     conn.commit()
     conn.close()
     return True, f"Thanks — you have {response.lower()} the offer."
+
+
+def send_offer_email_and_mark_offered(
+    *,
+    assignment_id: int,
+    referee_name: str,
+    referee_email: str,
+    game,
+    start_dt,
+    msg_key: str,
+):
+    """
+    Create offer, email referee, mark OFFERED.
+    If email fails, delete the offer record (keeps state consistent).
+    """
+    token = create_offer(assignment_id)
+
+    try:
+        cfg = smtp_settings()
+        base = cfg.get("app_base_url", "").rstrip("/")
+        if not base:
+            raise RuntimeError("APP_BASE_URL is missing. Add it in Render environment variables.")
+
+        game_line = f"{game['home_team']} vs {game['away_team']}"
+        when_line = start_dt.strftime("%Y-%m-%d %H:%M")
+        subject = f"{referee_name} — Match assignment: {game['home_team']} vs {game['away_team']}"
+
+        # Portal URL (guaranteed fallback even if email filtering ever happens)
+        portal_url = f"{base}/?offer_token={token}"
+
+        text = (
+            f"Hi {referee_name},\n\n"
+            f"You have a match assignment offer:\n"
+            f"- Game: {game_line}\n"
+            f"- Field: {game['field_name']}\n"
+            f"- Start: {when_line}\n\n"
+            f"View and respond here:\n{portal_url}\n"
+        )
+
+        html = f"""
+        <div style="font-family: Arial, sans-serif; line-height:1.4;">
+          <p>Hi {referee_name},</p>
+          <p>You have a match assignment offer:</p>
+          <ul>
+            <li><b>Game:</b> {game_line}</li>
+            <li><b>Field:</b> {game['field_name']}</li>
+            <li><b>Start:</b> {when_line}</li>
+          </ul>
+          <p>
+            <a href="{portal_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
+              View offer
+            </a>
+          </p>
+          <p style="color:#666;font-size:12px;">
+            If the button doesn’t work, copy and paste this link:<br>{portal_url}
+          </p>
+        </div>
+        """
+
+        send_html_email(referee_email, referee_name, subject, html, text_body=text)
+
+        set_assignment_status(assignment_id, "OFFERED")
+        st.session_state[msg_key] = (
+            "Offer emailed successfully and marked as OFFERED.\n\n"
+            f"Fallback link (copy/paste): {portal_url}"
+        )
+
+    except Exception as e:
+        delete_offer_by_token(token)
+        st.session_state[msg_key] = f"Email failed — offer not created: {e}"
 
 
 # ============================================================
@@ -1077,7 +1135,7 @@ def render_my_offers_page() -> bool:
 
 
 # ============================================================
-# Public offer handler (legacy accept/decline links)
+# Legacy offer response handler (kept for backwards compatibility)
 # ============================================================
 def maybe_handle_offer_response():
     qp = st.query_params
@@ -1096,94 +1154,17 @@ def maybe_handle_offer_response():
 
 
 # ============================================================
-# Offer email helper (admin action)
-# ============================================================
-def send_offer_email_and_mark_offered(
-    *,
-    assignment_id: int,
-    referee_name: str,
-    referee_email: str,
-    game,
-    start_dt,
-    msg_key: str,
-):
-    """
-    Creates an offer token, emails the referee, then marks assignment as OFFERED.
-    If email fails, the offer record is removed (so the system stays consistent).
-    """
-    token = create_offer(assignment_id)
-
-    try:
-        cfg = smtp_settings()
-        base = cfg.get("app_base_url", "").rstrip("/")
-        if not base:
-            raise RuntimeError("APP_BASE_URL is missing. Add it in Render environment variables.")
-
-        game_line = f"{game['home_team']} vs {game['away_team']}"
-        when_line = start_dt.strftime("%Y-%m-%d %H:%M")
-        subject = f"{referee_name} — Match assignment: {game['home_team']} vs {game['away_team']}"
-
-        # Always include portal link fallback (guaranteed)
-        portal_url = f"{base}/?offer_token={token}"
-
-        text = (
-            f"Hi {referee_name},\n\n"
-            f"You have a match assignment offer:\n"
-            f"- Game: {game_line}\n"
-            f"- Field: {game['field_name']}\n"
-            f"- Start: {when_line}\n\n"
-            f"View and respond here:\n{portal_url}\n"
-        )
-
-        html = f"""
-        <div style="font-family: Arial, sans-serif; line-height:1.4;">
-          <p>Hi {referee_name},</p>
-          <p>You have a match assignment offer:</p>
-          <ul>
-            <li><b>Game:</b> {game_line}</li>
-            <li><b>Field:</b> {game['field_name']}</li>
-            <li><b>Start:</b> {when_line}</li>
-          </ul>
-          <p>
-            <a href="{portal_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
-              View offer
-            </a>
-          </p>
-          <p style="color:#666;font-size:12px;">
-            If the button doesn’t work, copy and paste this link:<br>{portal_url}
-          </p>
-        </div>
-        """
-
-        send_html_email(referee_email, referee_name, subject, html, text_body=text)
-
-        set_assignment_status(assignment_id, "OFFERED")
-        st.session_state[msg_key] = (
-            "Offer emailed successfully and marked as OFFERED.\n\n"
-            f"Fallback link (copy/paste): {portal_url}"
-        )
-
-    except Exception as e:
-        delete_offer_by_token(token)
-        st.session_state[msg_key] = f"Email failed — offer not created: {e}"
-
-
-# ============================================================
 # APP START
 # ============================================================
 init_db()
 
-# Referee portal: allow login before admin login
 maybe_handle_referee_portal_login()
-
-# Legacy accept/decline links still supported
 maybe_handle_offer_response()
 
-# If referee is logged in, show portal and stop (no admin UI)
+# If referee logged in, show portal and stop (no admin UI)
 if render_my_offers_page():
     st.stop()
 
-# Admin login flow
 handle_admin_login_via_query_params()
 maybe_restore_admin_from_session_param()
 
@@ -1216,10 +1197,9 @@ if not st.session_state.get("admin_email"):
             st.error("That email is not an authorised administrator.")
         else:
             try:
-                login_url = send_admin_login_email(email)
-                st.success("Login link created. If the email doesn’t arrive, use the link below:")
-                st.code(login_url)
-                st.markdown(f"[Open admin login link]({login_url})")
+                send_admin_login_email(email)
+                # Removed: direct login link display (as requested)
+                st.success("Login link sent. Check your email.")
             except Exception as e:
                 st.error(str(e))
 
