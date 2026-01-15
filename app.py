@@ -12,6 +12,13 @@ import streamlit as st
 from dateutil import parser as dtparser
 from streamlit_autorefresh import st_autorefresh
 
+from io import BytesIO
+
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+
 # ============================================================
 # CONFIG
 # ============================================================
@@ -836,6 +843,175 @@ def clear_assignment(assignment_id: int):
     conn.commit()
     conn.close()
 
+def get_admin_print_rows_for_date(selected_date: date):
+    """
+    Returns rows for the printable summary:
+    grouped by start time, includes teams, field, start_dt, and referee names per slot.
+    """
+    start_min = datetime.combine(selected_date, datetime.min.time()).isoformat(timespec="seconds")
+    start_max = datetime.combine(selected_date + timedelta(days=1), datetime.min.time()).isoformat(timespec="seconds")
+
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT
+            g.id AS game_id,
+            g.home_team,
+            g.away_team,
+            g.field_name,
+            g.start_dt,
+
+            a.slot_no,
+            a.status,
+            r.name AS ref_name
+        FROM games g
+        LEFT JOIN assignments a ON a.game_id = g.id
+        LEFT JOIN referees r ON r.id = a.referee_id
+        WHERE g.start_dt >= ? AND g.start_dt < ?
+        ORDER BY g.start_dt ASC, g.field_name ASC, g.home_team ASC, a.slot_no ASC
+        """,
+        (start_min, start_max),
+    ).fetchall()
+    conn.close()
+
+    # Build per-game structure
+    games_map = {}
+    for row in rows:
+        gid = row["game_id"]
+        if gid not in games_map:
+            games_map[gid] = {
+                "home_team": row["home_team"],
+                "away_team": row["away_team"],
+                "field_name": row["field_name"],
+                "start_dt": row["start_dt"],
+                "slots": {1: {"name": "", "status": "EMPTY"}, 2: {"name": "", "status": "EMPTY"}},
+            }
+
+        if row["slot_no"] in (1, 2):
+            nm = (row["ref_name"] or "").strip()
+            stt = (row["status"] or "EMPTY").strip().upper()
+            games_map[gid]["slots"][int(row["slot_no"])] = {"name": nm, "status": stt}
+
+    # Convert to list
+    out = []
+    for _, g in games_map.items():
+        out.append(g)
+
+    # Sort by start_dt
+    out.sort(key=lambda x: x["start_dt"])
+    return out
+
+
+def _format_ref_name(name: str, status: str) -> str:
+    name = (name or "").strip()
+    status = (status or "EMPTY").strip().upper()
+
+    if not name:
+        return "—"
+
+    # Include status when it adds clarity (optional but useful for admins)
+    if status in ("ACCEPTED", "ASSIGNED"):
+        return f"{name}"
+    if status in ("OFFERED", "DECLINED"):
+        return f"{name} ({status})"
+    if status == "EMPTY":
+        return f"{name}"
+    return f"{name} ({status})"
+
+
+def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
+    """
+    Creates an A4 landscape PDF (bytes) grouped by start time.
+    Columns: Teams, Field, Start, Referees
+    """
+    games = get_admin_print_rows_for_date(selected_date)
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=28,
+        rightMargin=28,
+        topMargin=28,
+        bottomMargin=28,
+        title=f"Game Summary {selected_date.isoformat()}",
+    )
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    title = Paragraph(f"<b>Game Summary</b> — {selected_date.isoformat()} (A4 Landscape)", styles["Title"])
+    story.append(title)
+    story.append(Spacer(1, 10))
+
+    if not games:
+        story.append(Paragraph("No games found for this date.", styles["Normal"]))
+        doc.build(story)
+        return buffer.getvalue()
+
+    # Group by start time (HH:MM)
+    grouped = {}
+    for g in games:
+        dt = dtparser.parse(g["start_dt"])
+        key = dt.strftime("%H:%M")
+        grouped.setdefault(key, []).append((dt, g))
+
+    # Ensure keys sorted chronologically
+    group_keys = sorted(grouped.keys(), key=lambda t: dtparser.parse(f"{selected_date.isoformat()} {t}"))
+
+    for gi, time_key in enumerate(group_keys):
+        story.append(Paragraph(f"<b>Start time: {time_key}</b>", styles["Heading2"]))
+        story.append(Spacer(1, 6))
+
+        data = [["Teams", "Field", "Start", "Referees"]]
+
+        for dt, g in grouped[time_key]:
+            teams = f"{g['home_team']} vs {g['away_team']}"
+            field = g["field_name"]
+            start_str = dt.strftime("%H:%M")
+            r1 = _format_ref_name(g["slots"][1]["name"], g["slots"][1]["status"])
+            r2 = _format_ref_name(g["slots"][2]["name"], g["slots"][2]["status"])
+            refs = f"{r1} / {r2}"
+
+            data.append([teams, field, start_str, refs])
+
+        table = Table(
+            data,
+            colWidths=[360, 120, 60, 230],  # tuned for A4 landscape
+            repeatRows=1,
+        )
+
+        table.setStyle(
+            TableStyle(
+                [
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 10),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+
+                    ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                    ("FONTSIZE", (0, 1), (-1, -1), 9),
+
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+
+        story.append(table)
+        story.append(Spacer(1, 12))
+
+        # Optional: page break between big time blocks if you want
+        # (kept off by default)
+        # if gi < len(group_keys) - 1:
+        #     story.append(PageBreak())
+
+    doc.build(story)
+    return buffer.getvalue()
 
 # ============================================================
 # Offers
@@ -1403,6 +1579,40 @@ with tabs[0]:
     count_games = sum(1 for g in games if game_local_date(g) == selected_date)
     st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
 
+    # ----------------------------
+    # Printable PDF (must be inside tabs[0])
+    # ----------------------------
+    st.markdown("---")
+    st.subheader("Printable Summary (A4 Landscape)")
+
+    c_pdf1, c_pdf2 = st.columns([1, 2])
+    with c_pdf1:
+        if st.button("Build PDF", key="build_pdf_btn"):
+            try:
+                pdf_bytes = build_admin_summary_pdf_bytes(selected_date)
+                st.session_state["admin_summary_pdf_bytes"] = pdf_bytes
+                st.success("PDF built.")
+            except Exception as e:
+                st.error(f"Failed to build PDF: {e}")
+
+    with c_pdf2:
+        pdf_bytes = st.session_state.get("admin_summary_pdf_bytes")
+        if pdf_bytes:
+            filename = f"game_summary_{selected_date.isoformat()}.pdf"
+            st.download_button(
+                label="Download PDF",
+                data=pdf_bytes,
+                file_name=filename,
+                mime="application/pdf",
+                key="download_pdf_btn",
+            )
+        else:
+            st.caption("Click **Build PDF** to generate the printable schedule.")
+    st.markdown("---")
+
+    # ----------------------------
+    # Existing game assignment UI
+    # ----------------------------
     for g in games:
         if game_local_date(g) != selected_date:
             continue
@@ -1564,12 +1774,7 @@ with tabs[0]:
                         st.session_state[action_key] = "—"
                         st.rerun()
 
-                    st.selectbox(
-                        "Action",
-                        action_options,
-                        key=action_key,
-                        on_change=on_action_change,
-                    )
+                    st.selectbox("Action", action_options, key=action_key, on_change=on_action_change)
 
                     if st.session_state.get(msg_key):
                         st.info(st.session_state[msg_key])
