@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import make_msgid, formatdate
 
 import pandas as pd
 import streamlit as st
@@ -182,6 +183,84 @@ def init_db():
 
 
 # ============================================================
+# Offer helpers
+# ============================================================
+def create_offer(assignment_id: int) -> str:
+    token = secrets.token_urlsafe(24)
+    conn = db()
+    conn.execute(
+        """
+        INSERT INTO offers(assignment_id, token, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (assignment_id, token, now_iso()),
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def delete_offer_by_token(token: str):
+    conn = db()
+    conn.execute("DELETE FROM offers WHERE token=?", (token,))
+    conn.commit()
+    conn.close()
+
+
+def get_offer_token_for_assignment(assignment_id: int) -> str | None:
+    conn = db()
+    row = conn.execute(
+        "SELECT token FROM offers WHERE assignment_id=? ORDER BY id DESC LIMIT 1",
+        (assignment_id,),
+    ).fetchone()
+    conn.close()
+    return row["token"] if row else None
+
+
+def resolve_offer(token: str, response: str) -> tuple[bool, str]:
+    conn = db()
+    offer = conn.execute(
+        """
+        SELECT id, assignment_id, responded_at, response
+        FROM offers
+        WHERE token=?
+        """,
+        (token,),
+    ).fetchone()
+
+    if not offer:
+        conn.close()
+        return False, "Invalid or unknown offer link."
+
+    if offer["responded_at"] is not None:
+        conn.close()
+        return False, f"This offer was already responded to ({offer['response']})."
+
+    conn.execute(
+        """
+        UPDATE offers
+        SET responded_at=?, response=?
+        WHERE id=?
+        """,
+        (now_iso(), response, offer["id"]),
+    )
+
+    new_status = "ACCEPTED" if response == "ACCEPTED" else "DECLINED"
+    conn.execute(
+        """
+        UPDATE assignments
+        SET status=?, updated_at=?
+        WHERE id=?
+        """,
+        (new_status, now_iso(), offer["assignment_id"]),
+    )
+
+    conn.commit()
+    conn.close()
+    return True, f"Thanks — you have {response.lower()} the offer."
+
+
+# ============================================================
 # Email (SMTP)
 # ============================================================
 def smtp_settings():
@@ -191,7 +270,7 @@ def smtp_settings():
     secrets_paths = [
         "/opt/render/.streamlit/secrets.toml",
         "/opt/render/project/src/.streamlit/secrets.toml",
-        str(BASE_DIR / ".streamlit" / "secrets.toml"),
+        str(BASE_DIR / ".streamlit" / "secrets.toml"),  # local dev
     ]
     if any(os.path.exists(p) for p in secrets_paths):
         try:
@@ -221,8 +300,8 @@ def send_html_email(
     text_body: str | None = None,
 ):
     """
-    Multipart/alternative + robust SMTP handshake.
-    Retries once, and tries port fallback (587 -> 2525) if needed.
+    Multipart/alternative: always include text/plain + text/html (helps deliverability).
+    Adds Message-ID + Date headers.
     """
     cfg = smtp_settings()
     if not (cfg["host"] and cfg["user"] and cfg["password"] and cfg["from_email"] and cfg["app_base_url"]):
@@ -231,43 +310,125 @@ def send_html_email(
             "SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL."
         )
 
-    if not text_body:
-        text_body = "You have a notification from Referee Allocator."
-
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f'{cfg["from_name"]} <{cfg["from_email"]}>'
     msg["To"] = f"{to_name} <{to_email}>"
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
+    msg["Date"] = formatdate(localtime=False)
+    msg["Message-ID"] = make_msgid(domain=cfg["from_email"].split("@")[-1])
 
-    ports_to_try = [cfg["port"]]
-    if cfg["port"] != 2525:
-        ports_to_try.append(2525)
+    if not text_body:
+        text_body = "You have a notification from Referee Allocator."
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    last_err = None
+    with smtplib.SMTP(cfg["host"], cfg["port"], timeout=20) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(cfg["user"], cfg["password"])
+        server.sendmail(cfg["from_email"], [to_email], msg.as_string())
 
-    for _attempt in range(2):
-        for port in ports_to_try:
-            server = None
-            try:
-                server = smtplib.SMTP(cfg["host"], port, timeout=20)
-                server.ehlo()
-                server.starttls()
-                server.ehlo()
-                server.login(cfg["user"], cfg["password"])
-                server.sendmail(cfg["from_email"], [to_email], msg.as_string())
-                server.quit()
-                return
-            except Exception as e:
-                last_err = e
-                try:
-                    if server:
-                        server.quit()
-                except Exception:
-                    pass
 
-    raise RuntimeError(f"SMTP send failed: {type(last_err).__name__}: {last_err}")
+def send_offer_email_and_mark_offered(
+    assignment_id: int,
+    referee_name: str,
+    referee_email: str,
+    game_row,
+    start_dt: datetime,
+    msg_key: str,
+):
+    """
+    Creates an offer token, emails referee (portal-first if enabled), marks assignment OFFERED.
+    If email fails, offer token is deleted and assignment is NOT marked OFFERED.
+    Also adds a visible fallback portal link in the Admin UI message.
+    """
+    cfg = smtp_settings()
+    base = cfg.get("app_base_url", "").rstrip("/")
+    if not base:
+        raise RuntimeError("APP_BASE_URL is missing. Set it in Render Environment Variables.")
+
+    token = create_offer(assignment_id)
+
+    game_line = f"{game_row['home_team']} vs {game_row['away_team']}"
+    when_line = start_dt.strftime("%Y-%m-%d %H:%M")
+
+    subject = f"{referee_name} — Match assignment: {game_row['home_team']} vs {game_row['away_team']}"
+
+    try:
+        if REF_PORTAL_ENABLED:
+            portal_url = f"{base}/?offer_token={token}"
+
+            text = (
+                f"Hi {referee_name},\n\n"
+                f"You have a match assignment offer:\n"
+                f"- Game: {game_line}\n"
+                f"- Field: {game_row['field_name']}\n"
+                f"- Start: {when_line}\n\n"
+                f"View and respond here:\n{portal_url}\n"
+            )
+
+            html = f"""
+            <div style="font-family: Arial, sans-serif; line-height:1.4;">
+              <p>Hi {referee_name},</p>
+              <p>You have a match assignment offer:</p>
+              <ul>
+                <li><b>Game:</b> {game_line}</li>
+                <li><b>Field:</b> {game_row['field_name']}</li>
+                <li><b>Start:</b> {when_line}</li>
+              </ul>
+              <p>
+                <a href="{portal_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
+                  View offer
+                </a>
+              </p>
+              <p style="color:#666;font-size:12px;">If the button doesn’t work, copy and paste this link:<br>{portal_url}</p>
+            </div>
+            """
+            send_html_email(referee_email, referee_name, subject, html, text_body=text)
+
+            set_assignment_status(assignment_id, "OFFERED")
+            st.session_state[msg_key] = "Offer emailed successfully and marked as OFFERED."
+
+            st.session_state[msg_key] += f"\n\nFallback link (copy/paste): {portal_url}"
+
+        else:
+            accept_url = f"{base}/?action=accept&token={token}"
+            decline_url = f"{base}/?action=decline&token={token}"
+
+            text = (
+                f"Hi {referee_name},\n\n"
+                f"You have a referee assignment offer:\n"
+                f"- Game: {game_line}\n"
+                f"- Field: {game_row['field_name']}\n"
+                f"- Start: {when_line}\n\n"
+                f"Accept: {accept_url}\n"
+                f"Decline: {decline_url}\n"
+            )
+
+            html = f"""
+            <div style="font-family: Arial, sans-serif; line-height:1.4;">
+              <p>Hi {referee_name},</p>
+              <p>You have been offered a referee assignment:</p>
+              <ul>
+                <li><b>Game:</b> {game_line}</li>
+                <li><b>Field:</b> {game_row['field_name']}</li>
+                <li><b>Start:</b> {when_line}</li>
+              </ul>
+              <p>
+                <a href="{accept_url}">ACCEPT</a> |
+                <a href="{decline_url}">DECLINE</a>
+              </p>
+            </div>
+            """
+            send_html_email(referee_email, referee_name, subject, html, text_body=text)
+
+            set_assignment_status(assignment_id, "OFFERED")
+            st.session_state[msg_key] = "Offer emailed successfully and marked as OFFERED."
+
+    except Exception as e:
+        delete_offer_by_token(token)
+        raise RuntimeError(f"Email failed — offer not created: {e}") from e
 
 
 # ============================================================
@@ -464,6 +625,7 @@ def send_admin_login_email(email: str) -> str:
           Sign in
         </a>
       </p>
+      <p style="color:#666;font-size:12px;">If the button doesn’t work, copy and paste this link:<br>{login_url}</p>
       <p>If you didn’t request this, you can ignore this email.</p>
     </div>
     """
@@ -864,71 +1026,6 @@ def clear_assignment(assignment_id: int):
     conn.close()
 
 
-def create_offer(assignment_id: int) -> str:
-    token = secrets.token_urlsafe(24)
-    conn = db()
-    conn.execute(
-        """
-        INSERT INTO offers(assignment_id, token, created_at)
-        VALUES (?, ?, ?)
-        """,
-        (assignment_id, token, now_iso()),
-    )
-    conn.commit()
-    conn.close()
-    return token
-
-
-def delete_offer_by_token(token: str):
-    conn = db()
-    conn.execute("DELETE FROM offers WHERE token=?", (token,))
-    conn.commit()
-    conn.close()
-
-
-def resolve_offer(token: str, response: str) -> tuple[bool, str]:
-    conn = db()
-    offer = conn.execute(
-        """
-        SELECT id, assignment_id, responded_at, response
-        FROM offers
-        WHERE token=?
-        """,
-        (token,),
-    ).fetchone()
-
-    if not offer:
-        conn.close()
-        return False, "Invalid or unknown offer link."
-
-    if offer["responded_at"] is not None:
-        conn.close()
-        return False, f"This offer was already responded to ({offer['response']})."
-
-    conn.execute(
-        """
-        UPDATE offers
-        SET responded_at=?, response=?
-        WHERE id=?
-        """,
-        (now_iso(), response, offer["id"]),
-    )
-
-    new_status = "ACCEPTED" if response == "ACCEPTED" else "DECLINED"
-    conn.execute(
-        """
-        UPDATE assignments
-        SET status=?, updated_at=?
-        WHERE id=?
-        """,
-        (new_status, now_iso(), offer["assignment_id"]),
-    )
-
-    conn.commit()
-    conn.close()
-    return True, f"Thanks — you have {response.lower()} the offer."
-
-
 # ============================================================
 # Referee portal (My Offers)
 # ============================================================
@@ -1106,101 +1203,6 @@ def maybe_handle_offer_response():
 
 
 # ============================================================
-# Offer sender helper (prevents indentation issues)
-# ============================================================
-def send_offer_email_and_mark_offered(
-    *,
-    assignment_id: int,
-    referee_name: str,
-    referee_email: str,
-    game_row,
-    start_dt,
-    msg_key: str,
-):
-    token = create_offer(assignment_id)
-    try:
-        cfg = smtp_settings()
-        base = cfg.get("app_base_url", "").rstrip("/")
-
-        game_line = f"{game_row['home_team']} vs {game_row['away_team']}"
-        when_line = start_dt.strftime("%Y-%m-%d %H:%M")
-        subject = f"{referee_name} — Match assignment: {game_line}"
-
-        if REF_PORTAL_ENABLED:
-            portal_url = f"{base}/?offer_token={token}"
-
-            text = (
-                f"Hi {referee_name},\n\n"
-                f"You have a match assignment offer:\n"
-                f"- Game: {game_line}\n"
-                f"- Field: {game_row['field_name']}\n"
-                f"- Start: {when_line}\n\n"
-                f"View and respond here:\n{portal_url}\n"
-            )
-
-            html = f"""
-            <div style="font-family: Arial, sans-serif; line-height:1.4;">
-              <p>Hi {referee_name},</p>
-              <p>You have a match assignment offer:</p>
-              <ul>
-                <li><b>Game:</b> {game_line}</li>
-                <li><b>Field:</b> {game_row['field_name']}</li>
-                <li><b>Start:</b> {when_line}</li>
-              </ul>
-              <p>
-                <a href="{portal_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
-                  View offer
-                </a>
-              </p>
-              <p style="font-size:12px;color:#666;">
-                If the button doesn’t work, copy and paste this link:<br>{portal_url}
-              </p>
-            </div>
-            """
-
-            send_html_email(referee_email, referee_name, subject, html, text_body=text)
-
-        else:
-            accept_url = f"{base}/?action=accept&token={token}"
-            decline_url = f"{base}/?action=decline&token={token}"
-
-            text = (
-                f"Hi {referee_name},\n\n"
-                f"You have a referee assignment offer:\n"
-                f"- Game: {game_line}\n"
-                f"- Field: {game_row['field_name']}\n"
-                f"- Start: {when_line}\n\n"
-                f"Accept: {accept_url}\n"
-                f"Decline: {decline_url}\n"
-            )
-
-            html = f"""
-            <div style="font-family: Arial, sans-serif; line-height:1.4;">
-              <p>Hi {referee_name},</p>
-              <p>You have been offered a referee assignment:</p>
-              <ul>
-                <li><b>Game:</b> {game_line}</li>
-                <li><b>Field:</b> {game_row['field_name']}</li>
-                <li><b>Start:</b> {when_line}</li>
-              </ul>
-              <p>
-                <a href="{accept_url}">ACCEPT</a> |
-                <a href="{decline_url}">DECLINE</a>
-              </p>
-            </div>
-            """
-
-            send_html_email(referee_email, referee_name, subject, html, text_body=text)
-
-        set_assignment_status(assignment_id, "OFFERED")
-        st.session_state[msg_key] = "Offer emailed successfully and marked as OFFERED."
-
-    except Exception as e:
-        delete_offer_by_token(token)
-        st.session_state[msg_key] = f"Email failed — offer not created: {e}"
-
-
-# ============================================================
 # APP START
 # ============================================================
 init_db()
@@ -1270,14 +1272,7 @@ with tabs[3]:
     admins = list_admins()
     if admins:
         df_admins = pd.DataFrame(
-            [
-                {
-                    "email": a["email"],
-                    "active": "YES" if a["active"] == 1 else "NO",
-                    "created_at": a["created_at"],
-                }
-                for a in admins
-            ]
+            [{"email": a["email"], "active": "YES" if a["active"] == 1 else "NO", "created_at": a["created_at"]} for a in admins]
         )
         st.dataframe(df_admins, use_container_width=True)
 
@@ -1352,7 +1347,6 @@ with tabs[1]:
                 else:
                     added, updated = import_referees_csv(df_refs)
                     st.success(f"Imported referees. Added: {added}, Updated: {updated}")
-
                 st.rerun()
             except Exception as e:
                 st.error(str(e))
@@ -1512,7 +1506,6 @@ with tabs[0]:
                         disabled=(status in ("ACCEPTED", "ASSIGNED")),
                     )
 
-                    # Apply selection to DB
                     if pick != "— Select referee —":
                         chosen_ref_id = ref_lookup[pick]
                         if status in ("ACCEPTED", "ASSIGNED"):
@@ -1600,14 +1593,17 @@ with tabs[0]:
                                 st.session_state[action_key] = "—"
                                 return
 
-                            send_offer_email_and_mark_offered(
-                                assignment_id=assignment_id,
-                                referee_name=live_ref_name,
-                                referee_email=live_ref_email,
-                                game_row=g,
-                                start_dt=start_dt,
-                                msg_key=msg_key,
-                            )
+                            try:
+                                send_offer_email_and_mark_offered(
+                                    assignment_id=assignment_id,
+                                    referee_name=live_ref_name,
+                                    referee_email=live_ref_email,
+                                    game_row=g,
+                                    start_dt=start_dt,
+                                    msg_key=msg_key,
+                                )
+                            except Exception as e:
+                                st.session_state[msg_key] = str(e)
 
                         elif choice == "ASSIGN":
                             set_assignment_status(assignment_id, "ASSIGNED")
