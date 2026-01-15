@@ -1290,50 +1290,46 @@ def render_my_offers_page() -> bool:
         st.info("You have no offers at the moment.")
         return True
 
-    for o in offers:
-        start_dt = dtparser.parse(o["start_dt"])
-        title = f"{o['home_team']} vs {o['away_team']}"
-        subtitle = f"Field: {o['field_name']} • Start: {_time_12h(start_dt)} • Slot {o['slot_no']}"
+    with st.container(border=True):
+    st.subheader(title)
+    st.caption(subtitle)
 
-        with st.container(border=True):
-            st.subheader(title)
-            st.caption(subtitle)
+    # Show current status (if any), but DO NOT lock the UI
+    current_resp = (o["response"] or "").strip().upper()
+    if o["responded_at"] and current_resp:
+        if current_resp == "DECLINED":
+            st.markdown(
+                "<div style='font-weight:700;color:#c62828;'>Response recorded: DECLINED</div>",
+                unsafe_allow_html=True,
+            )
+        elif current_resp == "ACCEPTED":
+            st.markdown(
+                "<div style='font-weight:700;color:#2e7d32;'>Response recorded: ACCEPTED</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info(f"Response recorded: {current_resp}")
 
-            # Show current status (if any), but DO NOT lock the UI
-            current_resp = (o["response"] or "").strip().upper()
-            if o["responded_at"] and current_resp:
-                if current_resp == "DECLINED":
-                    st.markdown(
-                        "<div style='font-weight:700;color:#c62828;'>Response recorded: DECLINED</div>",
-                        unsafe_allow_html=True,
-                    )
-                elif current_resp == "ACCEPTED":
-                    st.markdown(
-                        "<div style='font-weight:700;color:#2e7d32;'>Response recorded: ACCEPTED</div>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.info(f"Response recorded: {current_resp}")
+        st.caption("You can change your response below if needed.")
 
-                st.caption("You can change your response below if needed.")
+    c1, c2 = st.columns(2)
 
-            c1, c2 = st.columns(2)
+    if c1.button("Accept", key=f"portal_acc_{o['token']}"):
+        ok, msg = resolve_offer(o["token"], "ACCEPTED")
+        if ok:
+            st.success("Accepted. Thank you.")
+        else:
+            st.error(msg)
+        st.rerun()
 
-            if c1.button("Accept", key=f"portal_acc_{o['token']}"):
-                ok, msg = resolve_offer(o["token"], "ACCEPTED")
-                if ok:
-                    st.success("Accepted. Thank you.")
-                else:
-                    st.error(msg)
-                st.rerun()
+    if c2.button("Decline", key=f"portal_dec_{o['token']}"):
+        ok, msg = resolve_offer(o["token"], "DECLINED")
+        if ok:
+            st.success("Declined. Thank you.")
+        else:
+            st.error(msg)
+        st.rerun()
 
-            if c2.button("Decline", key=f"portal_dec_{o['token']}"):
-                ok, msg = resolve_offer(o["token"], "DECLINED")
-                if ok:
-                    st.success("Declined. Thank you.")
-                else:
-                    st.error(msg)
-                st.rerun()
 
 
     return True
