@@ -1,18 +1,16 @@
 # =========================
-# PDF helpers (CLEAN)
+# PDF helpers (CLEAN + SAFE)
 # =========================
 from io import BytesIO
+from datetime import datetime, date, timedelta
+
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from datetime import datetime, date, timedelta
+
 
 def get_admin_print_rows_for_date(selected_date: date):
-    """
-    Returns per-game rows for the printable admin summary (for ONE date).
-    Each row includes teams, field, start_dt, and slot referee names/statuses.
-    """
     start_min = datetime.combine(selected_date, datetime.min.time()).isoformat(timespec="seconds")
     start_max = datetime.combine(selected_date + timedelta(days=1), datetime.min.time()).isoformat(timespec="seconds")
 
@@ -38,7 +36,7 @@ def get_admin_print_rows_for_date(selected_date: date):
     ).fetchall()
     conn.close()
 
-    games_map: dict[int, dict] = {}
+    games_map = {}
 
     for row in rows:
         gid = int(row["game_id"])
@@ -67,9 +65,6 @@ def get_admin_print_rows_for_date(selected_date: date):
 
 
 def _format_ref_name(name: str, status: str) -> str:
-    """
-    Display referee name with optional status (helpful for admins).
-    """
     name = (name or "").strip()
     status = (status or "EMPTY").strip().upper()
 
@@ -83,22 +78,10 @@ def _format_ref_name(name: str, status: str) -> str:
 
 
 def _time_12h(dt: datetime) -> str:
-    """
-    12-hour time formatting with no leading zero.
-    Cross-platform safe.
-    """
     return dt.strftime("%I:%M %p").lstrip("0")
 
 
 def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
-    """
-    Creates an A4 landscape PDF (bytes), grouped by start time.
-
-    Changes requested:
-    1) Title: removed "(A4 Landscape)"
-    2) 12-hour time format
-    3) Compressed layout to fit on one page as much as practical
-    """
     games = get_admin_print_rows_for_date(selected_date)
 
     buffer = BytesIO()
@@ -123,15 +106,15 @@ def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
         doc.build(story)
         return buffer.getvalue()
 
-    # Group by start time (12-hour)
-    grouped: dict[str, list[tuple[datetime, dict]]] = {}
+    # Group by start time
+    grouped = {}
     for g in games:
         dt = dtparser.parse(g["start_dt"])
         key = _time_12h(dt)
         grouped.setdefault(key, []).append((dt, g))
 
-    # Sort time keys chronologically by converting back using the date
-    group_keys = sorted(grouped.keys(), key=lambda t: dtparser.parse(f"{selected_date.isoformat()} {t}"))
+    # Safe chronological sort using actual datetimes (no string parsing)
+    group_keys = sorted(grouped.keys(), key=lambda k: min(dt for dt, _ in grouped[k]))
 
     for time_key in group_keys:
         story.append(Paragraph(f"<b>Start time: {time_key}</b>", styles["Heading3"]))
@@ -152,24 +135,21 @@ def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
 
         table = Table(
             data,
-            colWidths=[360, 120, 70, 220],  # slightly tighter than before
+            colWidths=[360, 120, 70, 220],
             repeatRows=1,
         )
-
         table.setStyle(
             TableStyle(
                 [
                     ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                     ("FONTSIZE", (0, 0), (-1, 0), 9),
                     ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
 
                     ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
                     ("FONTSIZE", (0, 1), (-1, -1), 8),
 
                     ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
                     ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-
                     ("LEFTPADDING", (0, 0), (-1, -1), 4),
                     ("RIGHTPADDING", (0, 0), (-1, -1), 4),
                     ("TOPPADDING", (0, 0), (-1, -1), 2),
@@ -183,3 +163,4 @@ def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
 
     doc.build(story)
     return buffer.getvalue()
+
