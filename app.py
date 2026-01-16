@@ -1046,7 +1046,7 @@ def delete_offer_by_token(token: str):
     conn.close()
 
 
-def def resolve_offer(token: str, response: str) -> tuple[bool, str]:
+def resolve_offer(token: str, response: str) -> tuple[bool, str]:
     """
     Record (or overwrite) a referee response for an offer token.
 
