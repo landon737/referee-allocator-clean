@@ -1151,18 +1151,20 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
             cx = left + (step * (i + 0.5))
             c.drawCentredString(cx, nums_y, n)
 
-        # Divider line beneath numbers — LOWERED
+                # Divider line beneath numbers — LOWERED
         line_y = nums_y - 18
         c.setLineWidth(0.8)
         c.line(left, line_y, right, line_y)
 
-                # Team W/L/D rows — auto-shrinking team names
+        # Right-aligned boxes (define BEFORE using box_x anywhere)
+        box_x = right - BOX_W  # right aligned
+
+        # Team W/L/D rows — team names left, W/L/D right (auto-shrinking names)
         wld1_y = line_y - 18
         wld2_y = wld1_y - 18
-
         wld_right_text = "W  /  L  /  D"
 
-        # Available width for team names (before W/L/D area)
+        # Available width for team names (everything before W/L/D text area)
         team_text_max_w = (box_x - 14) - left
 
         # Team 1
@@ -1170,6 +1172,7 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         size1 = fit_left_text_size(team1, team_text_max_w, FOOT_LABEL_SIZE, 9)
         c.setFont("Helvetica-Bold", size1)
         c.drawString(left, wld1_y, team1)
+        c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
         c.drawRightString(box_x - 10, wld1_y, wld_right_text)
 
         # Team 2
@@ -1177,13 +1180,11 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         size2 = fit_left_text_size(team2, team_text_max_w, FOOT_LABEL_SIZE, 9)
         c.setFont("Helvetica-Bold", size2)
         c.drawString(left, wld2_y, team2)
+        c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
         c.drawRightString(box_x - 10, wld2_y, wld_right_text)
 
-        # Right-aligned boxes
-        box_x = right - BOX_W  # right aligned
-
         # Conduct row
-        row1_y = wld_y - 22
+        row1_y = wld2_y - 22
         c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
         c.drawString(left, row1_y, "Conduct (/10)")
         c.setLineWidth(1)
