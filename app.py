@@ -1864,7 +1864,7 @@ with tabs[0]:
             unsafe_allow_html=True,
         )
 
-        with c_list:
+    with c_list:
         # Only show this panel when at least one OFFER exists in the week window
         has_offers = has_any_offers_for_window(week_start, week_end_excl)
 
