@@ -1037,7 +1037,7 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
     A4 portrait. 6 scorecards per page (2 across x 3 down).
     One scorecard per GAME (not per referee).
     Helvetica everywhere.
-    Each team has its own 1–10 tries row.
+    Each team has its own 1–10 tries row (team name ABOVE numbers).
     """
     games = get_admin_print_rows_for_date(selected_date)
 
@@ -1054,19 +1054,23 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
 
     pad = 6 * mm
 
+    # Top block sizes
     TITLE_SIZE = 16
     TEAMS_MAX_SIZE = 13
     TEAMS_MIN_SIZE = 9
     REFS_SIZE = 11
     FIELD_TIME_SIZE = 12
 
+    # Tries block
     TRIES_LABEL_SIZE = 10
-    TRIES_NUM_SIZE = 18
+    TRIES_NUM_SIZE = 18  # bigger than before
+    TEAM_ABOVE_NUM_MAX = 11
+    TEAM_ABOVE_NUM_MIN = 8
 
-    FOOT_LABEL_SIZE = 12
-
-    BOX_W = int(26 * 1.5)
-    BOX_H = int(14 * 1.5)
+    # Bottom block (reduced so it stays within border)
+    FOOT_LABEL_SIZE = 10  # reduced
+    BOX_W = int(22 * 1.3)  # reduced width
+    BOX_H = int(10 * 1.3)  # reduced height
 
     def fit_bold_font_size(text: str, max_width: float, start_size: int, min_size: int) -> int:
         size = start_size
@@ -1094,94 +1098,108 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         max_text_w = right - left
         cx = x0 + card_w / 2.0
 
+        # Title
         c.setFont("Helvetica-Bold", TITLE_SIZE)
         c.drawCentredString(cx, y_top, "REFEREE SCORECARD")
 
+        # Divider under title
         c.setLineWidth(0.8)
         c.line(left, y_top - 8, right, y_top - 8)
 
+        # Game line (bold, auto-fit)
         teams_line = f"{g['home_team']} vs {g['away_team']}"
         teams_size = fit_bold_font_size(teams_line, max_text_w, TEAMS_MAX_SIZE, TEAMS_MIN_SIZE)
         c.setFont("Helvetica-Bold", teams_size)
         c.drawCentredString(cx, y_top - 26, teams_line)
 
+        # Referees
         refs_line = _refs_names_only_for_game(g)
         c.setFont("Helvetica", REFS_SIZE)
         c.drawCentredString(cx, y_top - 44, refs_line)
 
+        # Field @ time
         dt = dtparser.parse(g["start_dt"])
         field_time = f"{g['field_name']} @ {_time_12h(dt)}"
         c.setFont("Helvetica", FIELD_TIME_SIZE)
         c.drawCentredString(cx, y_top - 62, field_time)
 
-        tries_label_y = y_top - 92
+        # Tries label
+        tries_label_y = y_top - 90
         c.setFont("Helvetica-Bold", TRIES_LABEL_SIZE)
         c.drawString(left, tries_label_y, "Tries:")
         c.setFont("Helvetica", TRIES_LABEL_SIZE)
         c.drawString(left + 34, tries_label_y, "(circle 2 numbers for a female try)")
 
-        row1_y = tries_label_y - 26
-        row2_y = row1_y - 22
+        # ---- Two team tries sections (team name ABOVE numbers) ----
+        # Use full width for numbers (bigger + more spaced)
+        nums_left = left
+        nums_right = right
+        nums_span = nums_right - nums_left
+        step = nums_span / 10.0
 
-        label_max_w = max_text_w * 0.38
-        label_left = left
-        numbers_left = left + label_max_w + 6
-        numbers_right = right
-        numbers_span = max(10, numbers_right - numbers_left)
+        # Vertical layout
+        team1_name_y = tries_label_y - 18
+        team1_nums_y = team1_name_y - 16
+        team2_name_y = team1_nums_y - 18
+        team2_nums_y = team2_name_y - 16
 
-        tries_row_num_size = max(13, TRIES_NUM_SIZE - 4)
-        team_row_max_size = 11
-        team_row_min_size = 8
-
-        def draw_team_tries_row(team_name: str, y: float):
+        def draw_team_name_above(team_name: str, y: float):
             nm = str(team_name)
-            size = fit_left_text_size(nm, label_max_w, team_row_max_size, team_row_min_size)
+            size = fit_left_text_size(nm, max_text_w, TEAM_ABOVE_NUM_MAX, TEAM_ABOVE_NUM_MIN)
             c.setFont("Helvetica-Bold", size)
-            c.drawString(label_left, y, nm)
+            c.drawString(left, y, nm)
 
-            step = numbers_span / 10.0
-            c.setFont("Helvetica-Bold", tries_row_num_size)
+        def draw_nums_row(y: float):
+            c.setFont("Helvetica-Bold", TRIES_NUM_SIZE)
             for i in range(10):
                 n = str(i + 1)
-                n_x = numbers_left + (step * (i + 0.5))
-                c.drawCentredString(n_x, y, n)
+                x = nums_left + (step * (i + 0.5))
+                c.drawCentredString(x, y, n)
 
-        draw_team_tries_row(g["home_team"], row1_y)
-        draw_team_tries_row(g["away_team"], row2_y)
+        draw_team_name_above(g["home_team"], team1_name_y)
+        draw_nums_row(team1_nums_y)
 
-        line_y = row2_y - 14
+        draw_team_name_above(g["away_team"], team2_name_y)
+        draw_nums_row(team2_nums_y)
+
+        # Divider beneath tries block
+        line_y = team2_nums_y - 14
         c.setLineWidth(0.8)
         c.line(left, line_y, right, line_y)
 
+        # Right-aligned boxes (smaller)
         box_x = right - BOX_W
 
-        wld1_y = line_y - 18
-        wld2_y = wld1_y - 18
+        # W/L/D rows (reduced font)
+        wld1_y = line_y - 16
+        wld2_y = wld1_y - 16
         wld_right_text = "W  /  L  /  D"
 
         wld_team_max_w = (box_x - 14) - left
 
         team1 = str(g["home_team"])
-        size1 = fit_left_text_size(team1, wld_team_max_w, FOOT_LABEL_SIZE, 9)
+        size1 = fit_left_text_size(team1, wld_team_max_w, FOOT_LABEL_SIZE, 8)
         c.setFont("Helvetica-Bold", size1)
         c.drawString(left, wld1_y, team1)
         c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
-        c.drawRightString(box_x - 10, wld1_y, wld_right_text)
+        c.drawRightString(box_x - 8, wld1_y, wld_right_text)
 
         team2 = str(g["away_team"])
-        size2 = fit_left_text_size(team2, wld_team_max_w, FOOT_LABEL_SIZE, 9)
+        size2 = fit_left_text_size(team2, wld_team_max_w, FOOT_LABEL_SIZE, 8)
         c.setFont("Helvetica-Bold", size2)
         c.drawString(left, wld2_y, team2)
         c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
-        c.drawRightString(box_x - 10, wld2_y, wld_right_text)
+        c.drawRightString(box_x - 8, wld2_y, wld_right_text)
 
-        conduct_y = wld2_y - 22
+        # Conduct row
+        conduct_y = wld2_y - 18
         c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
         c.drawString(left, conduct_y, "Conduct (/10)")
         c.setLineWidth(1)
         c.rect(box_x, conduct_y - 6, BOX_W, BOX_H)
 
-        unstrip_y = conduct_y - 26
+        # Unstripped row (ensure it stays inside border)
+        unstrip_y = conduct_y - (BOX_H + 10)
         c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
         c.drawString(left, unstrip_y, "Unstripped Players")
         c.rect(box_x, unstrip_y - 6, BOX_W, BOX_H)
@@ -1201,8 +1219,6 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
 
     c.save()
     return buf.getvalue()
-
-
 
 # ============================================================
 # Offers
