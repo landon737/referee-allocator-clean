@@ -1097,7 +1097,7 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
             size -= 1
         return min_size
 
-        def draw_card(x0: float, y0: float, g: dict):
+    def draw_card(x0: float, y0: float, g: dict):
         # Border
         c.setLineWidth(1)
         c.rect(x0, y0, card_w, card_h)
