@@ -1057,30 +1057,43 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
     # Internal padding within each card
     pad = 6 * mm
 
-    # Font sizes (tuned to be "as big as possible" while still fitting reliably)
+    # Font sizes
     TITLE_SIZE = 16
-    TEAMS_SIZE = 13
+    TEAMS_MAX_SIZE = 13
+    TEAMS_MIN_SIZE = 9
     REFS_SIZE = 11
     FIELD_TIME_SIZE = 12
 
     TRIES_LABEL_SIZE = 10
-    TRIES_NUM_SIZE = 18  # big; adjust higher if you want even bigger
+    TRIES_NUM_SIZE = 18  # big; increase if you want even bigger
 
     FOOT_LABEL_SIZE = 12
-    BOX_H = 14  # box height in points
-    BOX_W = 26  # small box width (enough for 1–2 digits)
 
-    # Card draw helper
+    # Boxes: 50% bigger + right-aligned
+    BOX_W = int(26 * 1.5)
+    BOX_H = int(14 * 1.5)
+
+    def fit_bold_font_size(text: str, max_width: float, start_size: int, min_size: int) -> int:
+        """
+        Reduce bold font size until the string fits max_width.
+        """
+        size = start_size
+        while size > min_size:
+            w = c.stringWidth(text, "Helvetica-Bold", size)
+            if w <= max_width:
+                return size
+            size -= 1
+        return min_size
+
     def draw_card(x0: float, y0: float, g: dict):
-        """
-        x0, y0 is bottom-left of card.
-        """
         # Border
         c.setLineWidth(1)
         c.rect(x0, y0, card_w, card_h)
 
-        x = x0 + pad
+        left = x0 + pad
+        right = x0 + card_w - pad
         y_top = y0 + card_h - pad
+        max_text_w = right - left
 
         # Title
         c.setFont("Helvetica-Bold", TITLE_SIZE)
@@ -1088,11 +1101,12 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
 
         # Divider line under title
         c.setLineWidth(0.8)
-        c.line(x, y_top - 8, x0 + card_w - pad, y_top - 8)
+        c.line(left, y_top - 8, right, y_top - 8)
 
-        # Teams (bold)
+        # Teams (bold) — adaptive font for long names
         teams = f"{g['home_team']} vs {g['away_team']}"
-        c.setFont("Helvetica-Bold", TEAMS_SIZE)
+        teams_size = fit_bold_font_size(teams, max_text_w, TEAMS_MAX_SIZE, TEAMS_MIN_SIZE)
+        c.setFont("Helvetica-Bold", teams_size)
         c.drawCentredString(x0 + card_w / 2.0, y_top - 26, teams)
 
         # Referees (single line)
@@ -1107,42 +1121,51 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         c.drawCentredString(x0 + card_w / 2.0, y_top - 62, field_time)
 
         # Tries label
-        tries_y = y_top - 92
+        tries_label_y = y_top - 92
         c.setFont("Helvetica-Bold", TRIES_LABEL_SIZE)
-        c.drawString(x, tries_y, "Tries:")
+        c.drawString(left, tries_label_y, "Tries:")
         c.setFont("Helvetica", TRIES_LABEL_SIZE)
-        c.drawString(x + 34, tries_y, "(circle 2 numbers for a female try)")
+        c.drawString(left + 34, tries_label_y, "(circle 2 numbers for a female try)")
+
+        # More space between label and numbers
+        nums_y = tries_label_y - 28
 
         # Tries numbers (big + spread)
-        nums_y = tries_y - 22
-        left = x
-        right = x0 + card_w - pad
         span = right - left
-        step = span / 10.0  # 10 numbers
+        step = span / 10.0
         c.setFont("Helvetica-Bold", TRIES_NUM_SIZE)
         for i in range(10):
             n = str(i + 1)
             cx = left + (step * (i + 0.5))
             c.drawCentredString(cx, nums_y, n)
 
-        # Divider line under tries
+        # Divider line beneath numbers — LOWERED
+        line_y = nums_y - 18
         c.setLineWidth(0.8)
-        c.line(x, nums_y - 10, x0 + card_w - pad, nums_y - 10)
+        c.line(left, line_y, right, line_y)
 
-        # Conduct + small box
-        row1_y = nums_y - 34
+        # Team 1 / Team 2 W/L/D row (above Conduct/Unstripped)
+        wld_y = line_y - 18
+        c.setFont("Helvetica-Bold", 11)
+        wld_text = "Team 1:  W  /  L  /  D                   Team 2:  W  /  L  /  D"
+        # Keep it on one line; if it ever gets tight, it will still fit at 11 on this card width.
+        c.drawString(left, wld_y, wld_text)
+
+        # Right-aligned boxes
+        box_x = right - BOX_W  # right aligned
+
+        # Conduct row
+        row1_y = wld_y - 22
         c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
-        c.drawString(x, row1_y, "Conduct (/10)")
-        box1_x = x + 95
+        c.drawString(left, row1_y, "Conduct (/10)")
         c.setLineWidth(1)
-        c.rect(box1_x, row1_y - 4, BOX_W, BOX_H)
+        c.rect(box_x, row1_y - 6, BOX_W, BOX_H)
 
-        # Unstripped Players + small box
-        row2_y = row1_y - 22
+        # Unstripped row
+        row2_y = row1_y - 26
         c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
-        c.drawString(x, row2_y, "Unstripped Players")
-        box2_x = x + 120
-        c.rect(box2_x, row2_y - 4, BOX_W, BOX_H)
+        c.drawString(left, row2_y, "Unstripped Players")
+        c.rect(box_x, row2_y - 6, BOX_W, BOX_H)
 
     # Paginate 6 per page
     for idx, g in enumerate(games):
@@ -1160,6 +1183,7 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
 
     c.save()
     return buf.getvalue()
+
 
 
 # ============================================================
@@ -1750,7 +1774,7 @@ with tabs[0]:
     count_games = sum(1 for g in games if game_local_date(g) == selected_date)
     st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
 
-        # Printable PDF UI (inside Admin tab — correct indentation)
+    # Printable PDF UI (inside Admin tab — correct indentation)
     st.markdown("---")
     st.subheader("Printable Summary")
 
