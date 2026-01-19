@@ -1085,6 +1085,18 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
             size -= 1
         return min_size
 
+        def fit_left_text_size(text: str, max_width: float, start_size: int, min_size: int) -> int:
+        """
+        Reduce left-aligned bold text size until it fits max_width.
+        Used for team names in W/L/D rows.
+        """
+        size = start_size
+        while size > min_size:
+            if c.stringWidth(text, "Helvetica-Bold", size) <= max_width:
+                return size
+            size -= 1
+        return min_size
+
     def draw_card(x0: float, y0: float, g: dict):
         # Border
         c.setLineWidth(1)
@@ -1144,12 +1156,28 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         c.setLineWidth(0.8)
         c.line(left, line_y, right, line_y)
 
-        # Team 1 / Team 2 W/L/D row (above Conduct/Unstripped)
-        wld_y = line_y - 18
-        c.setFont("Helvetica-Bold", 11)
-        wld_text = "Team 1:  W  /  L  /  D                   Team 2:  W  /  L  /  D"
-        # Keep it on one line; if it ever gets tight, it will still fit at 11 on this card width.
-        c.drawString(left, wld_y, wld_text)
+                # Team W/L/D rows — auto-shrinking team names
+        wld1_y = line_y - 18
+        wld2_y = wld1_y - 18
+
+        wld_right_text = "W  /  L  /  D"
+
+        # Available width for team names (before W/L/D area)
+        team_text_max_w = (box_x - 14) - left
+
+        # Team 1
+        team1 = str(g["home_team"])
+        size1 = fit_left_text_size(team1, team_text_max_w, FOOT_LABEL_SIZE, 9)
+        c.setFont("Helvetica-Bold", size1)
+        c.drawString(left, wld1_y, team1)
+        c.drawRightString(box_x - 10, wld1_y, wld_right_text)
+
+        # Team 2
+        team2 = str(g["away_team"])
+        size2 = fit_left_text_size(team2, team_text_max_w, FOOT_LABEL_SIZE, 9)
+        c.setFont("Helvetica-Bold", size2)
+        c.drawString(left, wld2_y, team2)
+        c.drawRightString(box_x - 10, wld2_y, wld_right_text)
 
         # Right-aligned boxes
         box_x = right - BOX_W  # right aligned
@@ -1167,6 +1195,7 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         c.drawString(left, row2_y, "Unstripped Players")
         c.rect(box_x, row2_y - 6, BOX_W, BOX_H)
 
+    
     # Paginate 6 per page
     for idx, g in enumerate(games):
         if idx > 0 and idx % 6 == 0:
