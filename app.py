@@ -1149,8 +1149,8 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         team1_name_y = field_div_y - 16
         team1_nums_y = team1_name_y - 20
 
-        # Increase spacing between teams by 40%
-        INTER_TEAM_GAP = int(18 * 1.4)
+        # Increase spacing between teams by 100%
+        INTER_TEAM_GAP = int(18 * 2.0)
 
         team2_name_y = team1_nums_y - INTER_TEAM_GAP
         team2_nums_y = team2_name_y - 20
