@@ -1085,7 +1085,7 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
             size -= 1
         return min_size
 
-        def fit_left_text_size(text: str, max_width: float, start_size: int, min_size: int) -> int:
+    def fit_left_text_size(text: str, max_width: float, start_size: int, min_size: int) -> int:
         """
         Reduce left-aligned bold text size until it fits max_width.
         Used for team names in W/L/D rows.
