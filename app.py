@@ -1037,7 +1037,10 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
     A4 portrait. 6 scorecards per page (2 across x 3 down).
     One scorecard per GAME (not per referee).
     Helvetica everywhere.
-    Each team has its own 1–10 tries row (team name ABOVE numbers).
+    Each team has its own 1–10 tries row:
+      - Team name ABOVE the numbers
+      - "W / L / D" on the same line (right-aligned)
+    No extra W/L/D block below the tries divider (removed to save space).
     """
     games = get_admin_print_rows_for_date(selected_date)
 
@@ -1054,23 +1057,23 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
 
     pad = 6 * mm
 
-    # Top block sizes
     TITLE_SIZE = 16
     TEAMS_MAX_SIZE = 13
     TEAMS_MIN_SIZE = 9
     REFS_SIZE = 11
     FIELD_TIME_SIZE = 12
 
-    # Tries block
     TRIES_LABEL_SIZE = 10
-    TRIES_NUM_SIZE = 18  # bigger than before
     TEAM_ABOVE_NUM_MAX = 11
     TEAM_ABOVE_NUM_MIN = 8
 
-    # Bottom block (reduced so it stays within border)
-    FOOT_LABEL_SIZE = 10  # reduced
-    BOX_W = int(22 * 1.3)  # reduced width
-    BOX_H = int(10 * 1.3)  # reduced height
+    # Bigger numbers, but we now save space by removing the lower W/L/D block
+    TRIES_NUM_SIZE = 18
+
+    # Bottom block (kept compact so it never spills)
+    FOOT_LABEL_SIZE = 10
+    BOX_W = int(22 * 1.25)
+    BOX_H = int(10 * 1.25)
 
     def fit_bold_font_size(text: str, max_width: float, start_size: int, min_size: int) -> int:
         size = start_size
@@ -1123,31 +1126,42 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         c.setFont("Helvetica", FIELD_TIME_SIZE)
         c.drawCentredString(cx, y_top - 62, field_time)
 
-        # Tries label
-        tries_label_y = y_top - 90
+        # Tries label (moved UP a little)
+        tries_label_y = y_top - 84
         c.setFont("Helvetica-Bold", TRIES_LABEL_SIZE)
         c.drawString(left, tries_label_y, "Tries:")
         c.setFont("Helvetica", TRIES_LABEL_SIZE)
         c.drawString(left + 34, tries_label_y, "(circle 2 numbers for a female try)")
 
-        # ---- Two team tries sections (team name ABOVE numbers) ----
-        # Use full width for numbers (bigger + more spaced)
+        # Numbers use full width (spaced out)
         nums_left = left
         nums_right = right
         nums_span = nums_right - nums_left
         step = nums_span / 10.0
 
-        # Vertical layout
-        team1_name_y = tries_label_y - 18
-        team1_nums_y = team1_name_y - 16
-        team2_name_y = team1_nums_y - 18
-        team2_nums_y = team2_name_y - 16
+        wld_text = "W  /  L  /  D"
+        wld_w = c.stringWidth(wld_text, "Helvetica-Bold", FOOT_LABEL_SIZE)
 
-        def draw_team_name_above(team_name: str, y: float):
+        # Vertical layout (more space between team name and numbers)
+        team1_name_y = tries_label_y - 16
+        team1_nums_y = team1_name_y - 20
+
+        team2_name_y = team1_nums_y - 18
+        team2_nums_y = team2_name_y - 20
+
+        def draw_team_name_with_wld(team_name: str, y: float):
             nm = str(team_name)
-            size = fit_left_text_size(nm, max_text_w, TEAM_ABOVE_NUM_MAX, TEAM_ABOVE_NUM_MIN)
+
+            # Reserve space on right for W/L/D
+            max_name_w = max_text_w - (wld_w + 6)
+            size = fit_left_text_size(nm, max_name_w, TEAM_ABOVE_NUM_MAX, TEAM_ABOVE_NUM_MIN)
+
             c.setFont("Helvetica-Bold", size)
             c.drawString(left, y, nm)
+
+            # W/L/D right aligned (same line)
+            c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
+            c.drawRightString(right, y, wld_text)
 
         def draw_nums_row(y: float):
             c.setFont("Helvetica-Bold", TRIES_NUM_SIZE)
@@ -1156,10 +1170,10 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
                 x = nums_left + (step * (i + 0.5))
                 c.drawCentredString(x, y, n)
 
-        draw_team_name_above(g["home_team"], team1_name_y)
+        draw_team_name_with_wld(g["home_team"], team1_name_y)
         draw_nums_row(team1_nums_y)
 
-        draw_team_name_above(g["away_team"], team2_name_y)
+        draw_team_name_with_wld(g["away_team"], team2_name_y)
         draw_nums_row(team2_nums_y)
 
         # Divider beneath tries block
@@ -1167,38 +1181,15 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         c.setLineWidth(0.8)
         c.line(left, line_y, right, line_y)
 
-        # Right-aligned boxes (smaller)
+        # Bottom rows: Conduct + Unstripped ONLY (no extra W/L/D block)
         box_x = right - BOX_W
 
-        # W/L/D rows (reduced font)
-        wld1_y = line_y - 16
-        wld2_y = wld1_y - 16
-        wld_right_text = "W  /  L  /  D"
-
-        wld_team_max_w = (box_x - 14) - left
-
-        team1 = str(g["home_team"])
-        size1 = fit_left_text_size(team1, wld_team_max_w, FOOT_LABEL_SIZE, 8)
-        c.setFont("Helvetica-Bold", size1)
-        c.drawString(left, wld1_y, team1)
-        c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
-        c.drawRightString(box_x - 8, wld1_y, wld_right_text)
-
-        team2 = str(g["away_team"])
-        size2 = fit_left_text_size(team2, wld_team_max_w, FOOT_LABEL_SIZE, 8)
-        c.setFont("Helvetica-Bold", size2)
-        c.drawString(left, wld2_y, team2)
-        c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
-        c.drawRightString(box_x - 8, wld2_y, wld_right_text)
-
-        # Conduct row
-        conduct_y = wld2_y - 18
+        conduct_y = line_y - 18
         c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
         c.drawString(left, conduct_y, "Conduct (/10)")
         c.setLineWidth(1)
         c.rect(box_x, conduct_y - 6, BOX_W, BOX_H)
 
-        # Unstripped row (ensure it stays inside border)
         unstrip_y = conduct_y - (BOX_H + 10)
         c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
         c.drawString(left, unstrip_y, "Unstripped Players")
@@ -1219,6 +1210,7 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
 
     c.save()
     return buf.getvalue()
+
 
 # ============================================================
 # Offers
