@@ -1149,7 +1149,10 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         team1_name_y = field_div_y - 16
         team1_nums_y = team1_name_y - 20
 
-        team2_name_y = team1_nums_y - 18
+        # Increase spacing between teams by 20%
+        INTER_TEAM_GAP = int(18 * 1.2)
+
+        team2_name_y = team1_nums_y - INTER_TEAM_GAP
         team2_nums_y = team2_name_y - 20
 
         def draw_team_name_with_wld(team_name: str, y: float):
