@@ -1,5 +1,5 @@
 # app.py
-# Referee Allocator (MVP) — Admin + Referee Portal + Offers + Blackouts + Printable A4 Landscape PDF
+# Referee Allocator (MVP) — Admin + Referee Portal + Offers + Blackouts + Printable PDFs
 
 import os
 import sqlite3
@@ -23,6 +23,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
+
 
 # ============================================================
 # CONFIG
@@ -71,7 +72,6 @@ def status_badge(text: str, bg: str, fg: str = "white"):
 
 
 def _time_12h(dt: datetime) -> str:
-    # Cross-platform safe 12hr format with no leading zero
     return dt.strftime("%I:%M %p").lstrip("0")
 
 
@@ -123,7 +123,7 @@ def init_db():
             game_id INTEGER NOT NULL,
             slot_no INTEGER NOT NULL,
             referee_id INTEGER,
-            status TEXT NOT NULL DEFAULT 'EMPTY', -- EMPTY, OFFERED, ACCEPTED, DECLINED, ASSIGNED
+            status TEXT NOT NULL DEFAULT 'EMPTY',
             updated_at TEXT NOT NULL,
             UNIQUE(game_id, slot_no),
             FOREIGN KEY(game_id) REFERENCES games(id),
@@ -140,7 +140,7 @@ def init_db():
             token TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL,
             responded_at TEXT,
-            response TEXT, -- ACCEPTED or DECLINED
+            response TEXT,
             FOREIGN KEY(assignment_id) REFERENCES assignments(id)
         );
         """
@@ -151,14 +151,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS blackouts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             referee_id INTEGER NOT NULL,
-            blackout_date TEXT NOT NULL, -- YYYY-MM-DD
+            blackout_date TEXT NOT NULL,
             UNIQUE(referee_id, blackout_date),
             FOREIGN KEY(referee_id) REFERENCES referees(id)
         );
         """
     )
 
-    # Admin allowlist + magic links
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS admins (
@@ -205,8 +204,6 @@ def init_db():
 # ============================================================
 def smtp_settings():
     """
-    Env vars (Render) take priority; secrets.toml (local) is fallback.
-
     Required:
       SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD,
       SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL
@@ -245,11 +242,14 @@ def send_html_email(
     html_body: str,
     text_body: str | None = None,
 ):
-    """
-    Multipart/alternative: include text/plain + text/html (helps deliverability).
-    """
     cfg = smtp_settings()
-    if not (cfg["host"] and cfg["user"] and cfg["password"] and cfg["from_email"] and cfg["app_base_url"]):
+    if not (
+        cfg["host"]
+        and cfg["user"]
+        and cfg["password"]
+        and cfg["from_email"]
+        and cfg["app_base_url"]
+    ):
         raise RuntimeError(
             "Email not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, "
             "SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL."
@@ -314,7 +314,9 @@ def set_admin_active(email: str, active: bool):
 
 def list_admins():
     conn = db()
-    rows = conn.execute("SELECT email, active, created_at FROM admins ORDER BY email ASC").fetchall()
+    rows = conn.execute(
+        "SELECT email, active, created_at FROM admins ORDER BY email ASC"
+    ).fetchall()
     conn.close()
     return rows
 
@@ -441,14 +443,11 @@ def maybe_restore_admin_from_session_param():
         if ok:
             st.session_state["admin_email"] = value
         else:
-            st.query_params.clear()
+            st.query_params.pop("session", None)
+            st.rerun()
 
 
 def send_admin_login_email(email: str) -> str:
-    """
-    Sends the admin login email. Returns URL (useful for debugging),
-    but we do NOT display it in the UI.
-    """
     email = email.strip().lower()
     cfg = smtp_settings()
     base = cfg.get("app_base_url", "").rstrip("/")
@@ -463,7 +462,8 @@ def send_admin_login_email(email: str) -> str:
     html = f"""
     <div style="font-family: Arial, sans-serif; line-height: 1.4;">
       <p>Hi,</p>
-      <p>Use the button below to sign in as an administrator. This link expires in <b>15 minutes</b>.</p>
+      <p>Use the button below to sign in as an administrator.
+         This link expires in <b>15 minutes</b>.</p>
       <p>
         <a href="{login_url}" style="display:inline-block;padding:10px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:6px;">
           Sign in
@@ -484,7 +484,9 @@ def handle_admin_login_via_query_params():
         if ok:
             st.session_state["admin_email"] = value
             session_token = create_admin_session(value)
-            st.query_params.clear()
+
+            st.query_params.pop("admin_login", None)
+            st.query_params.pop("token", None)
             st.query_params["session"] = session_token
             st.rerun()
         else:
@@ -502,9 +504,8 @@ def admin_logout_button():
         with c2:
             if st.button("Log out"):
                 st.session_state.pop("admin_email", None)
-                st.query_params.clear()
+                st.query_params.pop("session", None)
                 st.rerun()
-
 
 # ============================================================
 # Imports & data helpers
@@ -532,7 +533,10 @@ def import_referees_csv(df: pd.DataFrame):
                 cur.execute("UPDATE referees SET name=? WHERE email=?", (name, email))
                 updated += 1
         else:
-            cur.execute("INSERT INTO referees(name, email, active) VALUES (?, ?, 1)", (name, email))
+            cur.execute(
+                "INSERT INTO referees(name, email, active) VALUES (?, ?, 1)",
+                (name, email),
+            )
             added += 1
 
     conn.commit()
@@ -770,45 +774,6 @@ def get_assignments_for_game(game_id: int):
     conn.close()
     return rows
 
-def get_acceptance_progress_for_window(start_date: date, end_date_exclusive: date) -> tuple[int, int]:
-    """
-    Returns (accepted_slots, total_slots) for games whose start_dt is within:
-      [start_date 00:00, end_date_exclusive 00:00)
-
-    accepted_slots counts assignments where status in (ACCEPTED, ASSIGNED).
-    total_slots counts all assignment rows for games in the window (i.e., required slots).
-    Read-only: no DB writes.
-    """
-    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
-    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
-
-    conn = db()
-    row = conn.execute(
-        """
-        SELECT
-            SUM(CASE WHEN UPPER(COALESCE(a.status,'')) IN ('ACCEPTED','ASSIGNED') THEN 1 ELSE 0 END) AS accepted_slots,
-            COUNT(a.id) AS total_slots
-        FROM games g
-        JOIN assignments a ON a.game_id = g.id
-        WHERE g.start_dt >= ? AND g.start_dt < ?
-        """,
-        (start_min, start_max),
-    ).fetchone()
-    conn.close()
-
-    accepted = int(row["accepted_slots"] or 0)
-    total = int(row["total_slots"] or 0)
-    return accepted, total
-
-
-def iso_week_window(d: date) -> tuple[date, date]:
-    """
-    ISO week window: Monday -> next Monday (end exclusive).
-    """
-    start = d - timedelta(days=d.weekday())  # Monday
-    end_excl = start + timedelta(days=7)
-    return start, end_excl
-
 
 def get_assignment_live(assignment_id: int):
     conn = db()
@@ -901,12 +866,65 @@ def clear_assignment(assignment_id: int):
 
 
 # ============================================================
+# Acceptance progress helpers
+# ============================================================
+def iso_week_window(d: date) -> tuple[date, date]:
+    start = d - timedelta(days=d.weekday())  # Monday
+    end_excl = start + timedelta(days=7)
+    return start, end_excl
+
+
+def get_acceptance_progress_for_window(start_date: date, end_date_exclusive: date) -> tuple[int, int]:
+    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
+    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
+
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN UPPER(COALESCE(a.status,'')) IN ('ACCEPTED','ASSIGNED') THEN 1 ELSE 0 END) AS accepted_slots,
+            COUNT(a.id) AS total_slots
+        FROM games g
+        JOIN assignments a ON a.game_id = g.id
+        WHERE g.start_dt >= ? AND g.start_dt < ?
+        """,
+        (start_min, start_max),
+    ).fetchone()
+    conn.close()
+
+    accepted = int(row["accepted_slots"] or 0)
+    total = int(row["total_slots"] or 0)
+    return accepted, total
+
+
+def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: date) -> list[str]:
+    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
+    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
+
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT TRIM(r.name) AS name
+        FROM games g
+        JOIN assignments a ON a.game_id = g.id
+        JOIN referees r ON r.id = a.referee_id
+        WHERE g.start_dt >= ? AND g.start_dt < ?
+          AND a.referee_id IS NOT NULL
+          AND UPPER(COALESCE(a.status,'')) NOT IN ('ACCEPTED','ASSIGNED')
+          AND TRIM(COALESCE(r.name,'')) <> ''
+        ORDER BY name ASC
+        """,
+        (start_min, start_max),
+    ).fetchall()
+    conn.close()
+
+    return [row["name"] for row in rows]
+
+
+# ============================================================
 # Printable PDF helpers
 # ============================================================
 def get_admin_print_rows_for_date(selected_date: date):
-    """
-    Per-game rows for ONE date, with slot referee names/status.
-    """
     start_min = datetime.combine(selected_date, datetime.min.time()).isoformat(timespec="seconds")
     start_max = datetime.combine(selected_date + timedelta(days=1), datetime.min.time()).isoformat(timespec="seconds")
 
@@ -933,7 +951,6 @@ def get_admin_print_rows_for_date(selected_date: date):
     conn.close()
 
     games_map = {}
-
     for row in rows:
         gid = int(row["game_id"])
         if gid not in games_map:
@@ -972,12 +989,6 @@ def _format_ref_name(name: str, status: str) -> str:
 
 
 def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
-    """
-    A4 landscape, grouped by start time.
-    - Title: NO "(A4 Landscape)"
-    - 12hr time format
-    - Compressed layout (tight margins/padding/font) to fit on 1 page where possible
-    """
     games = get_admin_print_rows_for_date(selected_date)
 
     buffer = BytesIO()
@@ -1002,14 +1013,12 @@ def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
         doc.build(story)
         return buffer.getvalue()
 
-    # group by exact start time (datetime), but label as 12hr
     grouped = {}
     for g in games:
         dt = dtparser.parse(g["start_dt"])
         key = _time_12h(dt)
         grouped.setdefault(key, []).append((dt, g))
 
-    # chronological sort without reparsing strings (safe)
     group_keys = sorted(grouped.keys(), key=lambda k: min(dt for dt, _ in grouped[k]))
 
     for time_key in group_keys:
@@ -1030,7 +1039,7 @@ def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
 
         table = Table(
             data,
-            colWidths=[360, 110, 75, 210],  # tuned for A4 landscape
+            colWidths=[360, 110, 75, 210],
             repeatRows=1,
         )
         table.setStyle(
@@ -1040,13 +1049,10 @@ def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
                     ("FONTSIZE", (0, 0), (-1, 0), 9),
                     ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-
                     ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
                     ("FONTSIZE", (0, 1), (-1, -1), 8),
-
                     ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
                     ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-
                     ("LEFTPADDING", (0, 0), (-1, -1), 3),
                     ("RIGHTPADDING", (0, 0), (-1, -1), 3),
                     ("TOPPADDING", (0, 0), (-1, -1), 1),
@@ -1061,33 +1067,14 @@ def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
     doc.build(story)
     return buffer.getvalue()
 
+
 def _refs_names_only_for_game(g: dict) -> str:
-    r1 = (g["slots"][1]["name"] or "").strip()
-    r2 = (g["slots"][2]["name"] or "").strip()
-    if not r1:
-        r1 = "—"
-    if not r2:
-        r2 = "—"
+    r1 = (g["slots"][1]["name"] or "").strip() or "—"
+    r2 = (g["slots"][2]["name"] or "").strip() or "—"
     return f"{r1} / {r2}"
 
 
 def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
-    """
-    A4 portrait. 6 scorecards per page (2 across x 3 down).
-    One scorecard per GAME (not per referee).
-    Helvetica everywhere.
-
-    Layout:
-    - Title
-    - Game line (bold)
-    - Referees
-    - Field @ time
-    - Divider line
-    - Team name + W/L/D (right) above a 1–10 row (for each team)
-    - Divider line
-    - Conduct (/10) + write-in line (right)
-    - Unstripped Players + write-in line (right)
-    """
     games = get_admin_print_rows_for_date(selected_date)
 
     buf = BytesIO()
@@ -1113,10 +1100,8 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
     TEAM_ABOVE_NUM_MIN = 8
 
     TRIES_NUM_SIZE = 18
-
     FOOT_LABEL_SIZE = 10
 
-    # Write-in line (replaces box)
     WRITE_LINE_W = int(22 * 1.25)
     WRITE_LINE_THICK = 1.2
 
@@ -1146,37 +1131,30 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         max_text_w = right - left
         cx = x0 + card_w / 2.0
 
-        # Title
         c.setFont("Helvetica-Bold", TITLE_SIZE)
         c.drawCentredString(cx, y_top, "REFEREE SCORECARD")
 
-        # Divider under title
         c.setLineWidth(0.8)
         c.line(left, y_top - 8, right, y_top - 8)
 
-        # Game line (bold, auto-fit)
         teams_line = f"{g['home_team']} vs {g['away_team']}"
         teams_size = fit_bold_font_size(teams_line, max_text_w, TEAMS_MAX_SIZE, TEAMS_MIN_SIZE)
         c.setFont("Helvetica-Bold", teams_size)
         c.drawCentredString(cx, y_top - 26, teams_line)
 
-        # Referees
         refs_line = _refs_names_only_for_game(g)
         c.setFont("Helvetica", REFS_SIZE)
         c.drawCentredString(cx, y_top - 44, refs_line)
 
-        # Field @ time
         dt = dtparser.parse(g["start_dt"])
         field_time = f"{g['field_name']} @ {_time_12h(dt)}"
         c.setFont("Helvetica", FIELD_TIME_SIZE)
         c.drawCentredString(cx, y_top - 62, field_time)
 
-        # NEW: Divider under Field line
         field_div_y = (y_top - 62) - 10
         c.setLineWidth(0.8)
         c.line(left, field_div_y, right, field_div_y)
 
-        # Two team tries rows (no "Tries:" label)
         nums_left = left
         nums_right = right
         nums_span = nums_right - nums_left
@@ -1188,7 +1166,6 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         team1_name_y = field_div_y - 16
         team1_nums_y = team1_name_y - 20
 
-        # Increase spacing between teams by 100%
         INTER_TEAM_GAP = int(18 * 2.0)
 
         team2_name_y = team1_nums_y - INTER_TEAM_GAP
@@ -1218,12 +1195,10 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
         draw_team_name_with_wld(g["away_team"], team2_name_y)
         draw_nums_row(team2_nums_y)
 
-        # Divider beneath tries block
         line_y = team2_nums_y - 14
         c.setLineWidth(0.8)
         c.line(left, line_y, right, line_y)
 
-        # Bottom rows: write-in lines (replace boxes)
         line_x2 = right
         line_x1 = right - WRITE_LINE_W
 
@@ -1282,14 +1257,6 @@ def delete_offer_by_token(token: str):
 
 
 def resolve_offer(token: str, response: str) -> tuple[bool, str]:
-    """
-    Record (or overwrite) a referee response for an offer token.
-
-    Overwrite is allowed:
-    - offers.responded_at is set to now again
-    - offers.response is overwritten
-    - assignments.status is set to ACCEPTED/DECLINED accordingly
-    """
     response = (response or "").strip().upper()
     if response not in ("ACCEPTED", "DECLINED"):
         return False, "Invalid response."
@@ -1297,7 +1264,7 @@ def resolve_offer(token: str, response: str) -> tuple[bool, str]:
     conn = db()
     offer = conn.execute(
         """
-        SELECT id, assignment_id, responded_at, response
+        SELECT id, assignment_id
         FROM offers
         WHERE token=?
         """,
@@ -1308,7 +1275,6 @@ def resolve_offer(token: str, response: str) -> tuple[bool, str]:
         conn.close()
         return False, "Invalid or unknown offer link."
 
-    # Always overwrite the response (even if already responded before)
     conn.execute(
         """
         UPDATE offers
@@ -1342,10 +1308,6 @@ def send_offer_email_and_mark_offered(
     start_dt,
     msg_key: str,
 ):
-    """
-    Create offer, email referee, mark OFFERED.
-    If email fails, delete the offer record (keeps state consistent).
-    """
     token = create_offer(assignment_id)
 
     try:
@@ -1356,7 +1318,7 @@ def send_offer_email_and_mark_offered(
 
         game_line = f"{game['home_team']} vs {game['away_team']}"
         when_line = start_dt.strftime("%Y-%m-%d %I:%M %p").lstrip("0")
-        subject = f"{referee_name} — Match assignment: {game['home_team']} vs {game['away_team']}"
+        subject = f"{referee_name} — Match assignment: {game_line}"
 
         portal_url = f"{base}/?offer_token={token}"
 
@@ -1393,7 +1355,6 @@ def send_offer_email_and_mark_offered(
 
         set_assignment_status(assignment_id, "OFFERED")
         st.session_state[msg_key] = "Offer emailed successfully and marked as OFFERED."
-
     except Exception as e:
         delete_offer_by_token(token)
         st.session_state[msg_key] = f"Email failed — offer not created: {e}"
@@ -1488,7 +1449,7 @@ def maybe_handle_referee_portal_login():
     st.session_state["referee_name"] = offer["ref_name"] or "Referee"
     st.session_state["referee_email"] = offer["ref_email"] or ""
 
-    st.query_params.clear()
+    st.query_params.pop("offer_token", None)
     st.rerun()
 
 
@@ -1534,7 +1495,6 @@ def render_my_offers_page() -> bool:
             st.subheader(title)
             st.caption(subtitle)
 
-            # Show current status (if any), but DO NOT lock the UI
             current_resp = (o["response"] or "").strip().upper()
             if o["responded_at"] and current_resp:
                 if current_resp == "DECLINED":
@@ -1573,9 +1533,6 @@ def render_my_offers_page() -> bool:
     return True
 
 
-# ============================================================
-# Legacy offer response handler (kept for backwards compatibility)
-# ============================================================
 def maybe_handle_offer_response():
     qp = st.query_params
     token = qp.get("token")
@@ -1591,7 +1548,6 @@ def maybe_handle_offer_response():
         st.info("You can close this page now.")
         st.stop()
 
-
 # ============================================================
 # APP START
 # ============================================================
@@ -1600,7 +1556,6 @@ init_db()
 maybe_handle_referee_portal_login()
 maybe_handle_offer_response()
 
-# If referee logged in, show portal and stop (no admin UI)
 if render_my_offers_page():
     st.stop()
 
@@ -1648,6 +1603,7 @@ admin_logout_button()
 
 tabs = st.tabs(["Admin", "Import", "Blackouts", "Administrators"])
 
+
 # ============================================================
 # Administrators tab
 # ============================================================
@@ -1658,7 +1614,14 @@ with tabs[3]:
     admins = list_admins()
     if admins:
         df_admins = pd.DataFrame(
-            [{"email": a["email"], "active": "YES" if a["active"] == 1 else "NO", "created_at": a["created_at"]} for a in admins]
+            [
+                {
+                    "email": a["email"],
+                    "active": "YES" if a["active"] == 1 else "NO",
+                    "created_at": a["created_at"],
+                }
+                for a in admins
+            ]
         )
         st.dataframe(df_admins, use_container_width=True)
 
@@ -1750,7 +1713,7 @@ with tabs[1]:
         st.dataframe(df_bl.head(20), use_container_width=True)
         if st.button("Import Blackouts", key="import_bl_btn"):
             added, skipped = import_blackouts_csv(df_bl)
-            st.success(f"Imported blackouts. Added: {added}. Skipped (unknown referee email): {skipped}")
+            st.success(f"Imported blackouts. Added: {added}. Skipped: {skipped}")
             st.rerun()
 
 
@@ -1844,46 +1807,28 @@ with tabs[0]:
     count_games = sum(1 for g in games if game_local_date(g) == selected_date)
     st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
 
-    # ============================================================
-    # Acceptance progress + "not yet accepted" list (read-only)
-    # Layout:
-    #   - Left: 1/3 width thick bar
-    #   - Right: 2/3 width 3-col name list (amber)
-    # ============================================================
+    # Acceptance progress UI
     week_start, week_end_excl = iso_week_window(selected_date)
     accepted_slots, total_slots = get_acceptance_progress_for_window(week_start, week_end_excl)
 
-    if total_slots > 0:
-        pct = accepted_slots / total_slots
-    else:
-        pct = 0.0
+    pct = (accepted_slots / total_slots) if total_slots else 0.0
+    pct_clamped = max(0.0, min(1.0, pct))
 
-    # Color rules:
-    # - Red   if < 50%
-    # - Amber if 50% to < 80%
-    # - Green if 100%
-    # (80–99%: keep Amber unless you want it Green)
     if total_slots == 0:
-        bar_color = "#9e9e9e"  # neutral grey
-    elif pct < 0.50:
-        bar_color = "#c62828"  # red
-    elif pct < 0.80:
-        bar_color = "#ffb300"  # amber
-    elif pct >= 1.0:
-        bar_color = "#2e7d32"  # green
+        bar_color = "#9e9e9e"
+    elif pct_clamped < 0.50:
+        bar_color = "#c62828"
+    elif pct_clamped < 0.90:
+        bar_color = "#ffb300"
     else:
-        bar_color = "#ffb300"  # amber (80–99%)
+        bar_color = "#2e7d32"
 
-    # People not yet accepted (unique, alphabetical)
     not_accepted_names = list_referees_not_accepted_for_window(week_start, week_end_excl)
 
-    # Two-column layout: left is 1/3 screen, right is 2/3
     c_bar, c_list = st.columns([1, 2], vertical_alignment="center")
 
     with c_bar:
-        # Thick custom progress bar (about 3x typical height)
         height_px = 24
-
         st.markdown(
             f"""
             <div style="font-size:12px; color:#666; margin-bottom:6px;">
@@ -1891,19 +1836,17 @@ with tabs[0]:
             </div>
 
             <div style="width:100%; background:#e0e0e0; border-radius:{height_px}px; height:{height_px}px; overflow:hidden;">
-              <div style="width:{max(0, min(100, pct*100)):.1f}%; background:{bar_color}; height:{height_px}px;"></div>
+              <div style="width:{pct_clamped*100:.1f}%; background:{bar_color}; height:{height_px}px;"></div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
     with c_list:
-        # Small-font, 3-column list (no lines), amber text
         st.markdown(
             "<div style='font-size:12px; color:#666; margin-bottom:6px;'><b>Yet to ACCEPT (unique)</b></div>",
             unsafe_allow_html=True,
         )
-
         if not not_accepted_names:
             st.markdown("<div style='font-size:12px; color:#2e7d32;'>All accepted ✅</div>", unsafe_allow_html=True)
         else:
@@ -1915,71 +1858,12 @@ with tabs[0]:
                         unsafe_allow_html=True,
                     )
 
-def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: date) -> list[str]:
-    """
-    Unique referee names (alphabetical) for assigned slots in the window
-    that are NOT yet ACCEPTED/ASSIGNED.
-
-    Rule: only include slots where referee_id IS NOT NULL (i.e., a referee has been chosen).
-    """
-    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
-    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
-
-    conn = db()
-    rows = conn.execute(
-        """
-        SELECT DISTINCT TRIM(r.name) AS name
-        FROM games g
-        JOIN assignments a ON a.game_id = g.id
-        JOIN referees r ON r.id = a.referee_id
-        WHERE g.start_dt >= ? AND g.start_dt < ?
-          AND a.referee_id IS NOT NULL
-          AND UPPER(COALESCE(a.status,'')) NOT IN ('ACCEPTED','ASSIGNED')
-          AND TRIM(COALESCE(r.name,'')) <> ''
-        ORDER BY name ASC
-        """,
-        (start_min, start_max),
-    ).fetchall()
-    conn.close()
-
-    return [row["name"] for row in rows]
-
-def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: date) -> list[str]:
-    """
-    Unique referee names (alphabetical) for assigned slots in the window
-    that are NOT yet ACCEPTED/ASSIGNED.
-
-    Rule: only include slots where referee_id IS NOT NULL (i.e., a referee has been chosen).
-    """
-    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
-    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
-
-    conn = db()
-    rows = conn.execute(
-        """
-        SELECT DISTINCT TRIM(r.name) AS name
-        FROM games g
-        JOIN assignments a ON a.game_id = g.id
-        JOIN referees r ON r.id = a.referee_id
-        WHERE g.start_dt >= ? AND g.start_dt < ?
-          AND a.referee_id IS NOT NULL
-          AND UPPER(COALESCE(a.status,'')) NOT IN ('ACCEPTED','ASSIGNED')
-          AND TRIM(COALESCE(r.name,'')) <> ''
-        ORDER BY name ASC
-        """,
-        (start_min, start_max),
-    ).fetchall()
-    conn.close()
-
-    return [row["name"] for row in rows]
-
-    # Printable PDF UI (inside Admin tab — correct indentation)
+    # Printable PDFs
     st.markdown("---")
     st.subheader("Printable Summary")
 
     c_pdf1, c_pdf2, c_pdf3, c_pdf4 = st.columns([1, 2, 1, 2])
 
-    # Summary PDF (existing)
     with c_pdf1:
         if st.button("Build Summary PDF", key="build_pdf_btn"):
             try:
@@ -2003,7 +1887,6 @@ def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: 
         else:
             st.caption("Click **Build Summary PDF** to generate the printable schedule.")
 
-    # NEW: Referee Scorecards PDF
     with c_pdf3:
         if st.button("Build Referee Scorecards", key="build_scorecards_btn"):
             try:
@@ -2027,7 +1910,6 @@ def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: 
         else:
             st.caption("Click **Build Referee Scorecards** to generate the 6-up scorecards.")
 
-
     # Games list + assignments UI
     for g in games:
         if game_local_date(g) != selected_date:
@@ -2038,7 +1920,6 @@ def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: 
 
         ref_options = ["— Select referee —"]
         ref_lookup = {}
-
         for r in refs:
             label = f"{r['name']} ({r['email']})"
             if referee_has_blackout(r["id"], gdate):
@@ -2056,8 +1937,8 @@ def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: 
             assigns = get_assignments_for_game(g["id"])
             cols = st.columns(2)
 
-            for idx, a in enumerate(assigns):
-                with cols[idx]:
+            for col_idx, a in enumerate(assigns):
+                with cols[col_idx]:
                     st.markdown(f"#### Slot {a['slot_no']}")
 
                     status = (a["status"] or "").strip().upper()
@@ -2126,10 +2007,9 @@ def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: 
 
                     def on_action_change(
                         assignment_id=a["id"],
-                        g=g,
-                        status=status,
-                        blackout=blackout,
+                        game_row=g,
                         start_dt=start_dt,
+                        gdate=gdate,
                         action_key=action_key,
                         msg_key=msg_key,
                         refpick_key=refpick_key,
@@ -2145,23 +2025,29 @@ def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: 
                             st.session_state[msg_key] = "Could not load assignment."
                             st.session_state[action_key] = "—"
                             st.rerun()
+                            return
 
                         live_ref_id = live_a["referee_id"]
                         live_ref_name = live_a["ref_name"]
                         live_ref_email = live_a["ref_email"]
+                        live_status = (live_a["status"] or "").strip().upper()
+
+                        live_blackout = False
+                        if live_ref_id is not None:
+                            live_blackout = referee_has_blackout(int(live_ref_id), gdate)
 
                         if live_ref_id is None and choice in ("OFFER", "ASSIGN"):
                             st.session_state[msg_key] = "Select a referee first."
                             st.session_state[action_key] = "—"
                             return
 
-                        if choice == "OFFER" and status in ("ACCEPTED", "ASSIGNED"):
+                        if choice == "OFFER" and live_status in ("ACCEPTED", "ASSIGNED"):
                             st.session_state[msg_key] = "This slot is already confirmed (ACCEPTED/ASSIGNED)."
                             st.session_state[action_key] = "—"
                             return
 
                         if choice == "OFFER":
-                            if blackout:
+                            if live_blackout:
                                 st.session_state[msg_key] = (
                                     "Offer blocked: referee is unavailable on this date (blackout). "
                                     "You can still ASSIGN manually if needed."
@@ -2173,7 +2059,7 @@ def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: 
                                 assignment_id=assignment_id,
                                 referee_name=live_ref_name,
                                 referee_email=live_ref_email,
-                                game=g,
+                                game=game_row,
                                 start_dt=start_dt,
                                 msg_key=msg_key,
                             )
