@@ -770,6 +770,45 @@ def get_assignments_for_game(game_id: int):
     conn.close()
     return rows
 
+def get_acceptance_progress_for_window(start_date: date, end_date_exclusive: date) -> tuple[int, int]:
+    """
+    Returns (accepted_slots, total_slots) for games whose start_dt is within:
+      [start_date 00:00, end_date_exclusive 00:00)
+
+    accepted_slots counts assignments where status in (ACCEPTED, ASSIGNED).
+    total_slots counts all assignment rows for games in the window (i.e., required slots).
+    Read-only: no DB writes.
+    """
+    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
+    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
+
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN UPPER(COALESCE(a.status,'')) IN ('ACCEPTED','ASSIGNED') THEN 1 ELSE 0 END) AS accepted_slots,
+            COUNT(a.id) AS total_slots
+        FROM games g
+        JOIN assignments a ON a.game_id = g.id
+        WHERE g.start_dt >= ? AND g.start_dt < ?
+        """,
+        (start_min, start_max),
+    ).fetchone()
+    conn.close()
+
+    accepted = int(row["accepted_slots"] or 0)
+    total = int(row["total_slots"] or 0)
+    return accepted, total
+
+
+def iso_week_window(d: date) -> tuple[date, date]:
+    """
+    ISO week window: Monday -> next Monday (end exclusive).
+    """
+    start = d - timedelta(days=d.weekday())  # Monday
+    end_excl = start + timedelta(days=7)
+    return start, end_excl
+
 
 def get_assignment_live(assignment_id: int):
     conn = db()
@@ -1804,6 +1843,22 @@ with tabs[0]:
     selected_date = st.selectbox("Show games for date", all_dates, index=default_idx, key="games_date_select")
     count_games = sum(1 for g in games if game_local_date(g) == selected_date)
     st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
+
+        # ============================================================
+    # Acceptance progress (read-only)
+    # Default: ISO week of selected_date (Mon -> Sun)
+    # ============================================================
+    week_start, week_end_excl = iso_week_window(selected_date)
+    accepted_slots, total_slots = get_acceptance_progress_for_window(week_start, week_end_excl)
+
+    if total_slots > 0:
+        pct = accepted_slots / total_slots
+        st.progress(
+            pct,
+            text=f"Week acceptance (ISO): {accepted_slots}/{total_slots} slots accepted",
+        )
+    else:
+        st.progress(0.0, text="Week acceptance (ISO): No slots found for this week")
 
     # Printable PDF UI (inside Admin tab — correct indentation)
     st.markdown("---")
