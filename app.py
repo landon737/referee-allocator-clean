@@ -1844,21 +1844,134 @@ with tabs[0]:
     count_games = sum(1 for g in games if game_local_date(g) == selected_date)
     st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
 
-        # ============================================================
-    # Acceptance progress (read-only)
-    # Default: ISO week of selected_date (Mon -> Sun)
+    # ============================================================
+    # Acceptance progress + "not yet accepted" list (read-only)
+    # Layout:
+    #   - Left: 1/3 width thick bar
+    #   - Right: 2/3 width 3-col name list (amber)
     # ============================================================
     week_start, week_end_excl = iso_week_window(selected_date)
     accepted_slots, total_slots = get_acceptance_progress_for_window(week_start, week_end_excl)
 
     if total_slots > 0:
         pct = accepted_slots / total_slots
-        st.progress(
-            pct,
-            text=f"Week acceptance (ISO): {accepted_slots}/{total_slots} slots accepted",
-        )
     else:
-        st.progress(0.0, text="Week acceptance (ISO): No slots found for this week")
+        pct = 0.0
+
+    # Color rules:
+    # - Red   if < 50%
+    # - Amber if 50% to < 80%
+    # - Green if 100%
+    # (80–99%: keep Amber unless you want it Green)
+    if total_slots == 0:
+        bar_color = "#9e9e9e"  # neutral grey
+    elif pct < 0.50:
+        bar_color = "#c62828"  # red
+    elif pct < 0.80:
+        bar_color = "#ffb300"  # amber
+    elif pct >= 1.0:
+        bar_color = "#2e7d32"  # green
+    else:
+        bar_color = "#ffb300"  # amber (80–99%)
+
+    # People not yet accepted (unique, alphabetical)
+    not_accepted_names = list_referees_not_accepted_for_window(week_start, week_end_excl)
+
+    # Two-column layout: left is 1/3 screen, right is 2/3
+    c_bar, c_list = st.columns([1, 2], vertical_alignment="center")
+
+    with c_bar:
+        # Thick custom progress bar (about 3x typical height)
+        height_px = 24
+
+        st.markdown(
+            f"""
+            <div style="font-size:12px; color:#666; margin-bottom:6px;">
+              <b>Week acceptance (ISO)</b> — {accepted_slots}/{total_slots}
+            </div>
+
+            <div style="width:100%; background:#e0e0e0; border-radius:{height_px}px; height:{height_px}px; overflow:hidden;">
+              <div style="width:{max(0, min(100, pct*100)):.1f}%; background:{bar_color}; height:{height_px}px;"></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with c_list:
+        # Small-font, 3-column list (no lines), amber text
+        st.markdown(
+            "<div style='font-size:12px; color:#666; margin-bottom:6px;'><b>Yet to ACCEPT (unique)</b></div>",
+            unsafe_allow_html=True,
+        )
+
+        if not not_accepted_names:
+            st.markdown("<div style='font-size:12px; color:#2e7d32;'>All accepted ✅</div>", unsafe_allow_html=True)
+        else:
+            cols3 = st.columns(3)
+            for i, name in enumerate(not_accepted_names):
+                with cols3[i % 3]:
+                    st.markdown(
+                        f"<div style='font-size:12px; color:#ffb300; line-height:1.6;'>{name}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: date) -> list[str]:
+    """
+    Unique referee names (alphabetical) for assigned slots in the window
+    that are NOT yet ACCEPTED/ASSIGNED.
+
+    Rule: only include slots where referee_id IS NOT NULL (i.e., a referee has been chosen).
+    """
+    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
+    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
+
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT TRIM(r.name) AS name
+        FROM games g
+        JOIN assignments a ON a.game_id = g.id
+        JOIN referees r ON r.id = a.referee_id
+        WHERE g.start_dt >= ? AND g.start_dt < ?
+          AND a.referee_id IS NOT NULL
+          AND UPPER(COALESCE(a.status,'')) NOT IN ('ACCEPTED','ASSIGNED')
+          AND TRIM(COALESCE(r.name,'')) <> ''
+        ORDER BY name ASC
+        """,
+        (start_min, start_max),
+    ).fetchall()
+    conn.close()
+
+    return [row["name"] for row in rows]
+
+def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: date) -> list[str]:
+    """
+    Unique referee names (alphabetical) for assigned slots in the window
+    that are NOT yet ACCEPTED/ASSIGNED.
+
+    Rule: only include slots where referee_id IS NOT NULL (i.e., a referee has been chosen).
+    """
+    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
+    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
+
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT TRIM(r.name) AS name
+        FROM games g
+        JOIN assignments a ON a.game_id = g.id
+        JOIN referees r ON r.id = a.referee_id
+        WHERE g.start_dt >= ? AND g.start_dt < ?
+          AND a.referee_id IS NOT NULL
+          AND UPPER(COALESCE(a.status,'')) NOT IN ('ACCEPTED','ASSIGNED')
+          AND TRIM(COALESCE(r.name,'')) <> ''
+        ORDER BY name ASC
+        """,
+        (start_min, start_max),
+    ).fetchall()
+    conn.close()
+
+    return [row["name"] for row in rows]
 
     # Printable PDF UI (inside Admin tab — correct indentation)
     st.markdown("---")
