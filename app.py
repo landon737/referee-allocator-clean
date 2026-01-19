@@ -21,6 +21,8 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import mm
 
 # ============================================================
 # CONFIG
@@ -1020,6 +1022,145 @@ def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
     doc.build(story)
     return buffer.getvalue()
 
+def _refs_names_only_for_game(g: dict) -> str:
+    # Names only, no status labels
+    r1 = (g["slots"][1]["name"] or "").strip()
+    r2 = (g["slots"][2]["name"] or "").strip()
+    if not r1:
+        r1 = "—"
+    if not r2:
+        r2 = "—"
+    return f"{r1} / {r2}"
+
+
+def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
+    """
+    A4 portrait. 6 scorecards per page (2 across x 3 down).
+    One scorecard per GAME (not per referee).
+    Helvetica everywhere.
+    Big tries (1-10) spread across the card.
+    """
+    games = get_admin_print_rows_for_date(selected_date)
+
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    page_w, page_h = A4
+
+    # Layout
+    outer_margin = 10 * mm
+    gutter_x = 6 * mm
+    gutter_y = 6 * mm
+
+    card_w = (page_w - (2 * outer_margin) - gutter_x) / 2.0
+    card_h = (page_h - (2 * outer_margin) - (2 * gutter_y)) / 3.0
+
+    # Internal padding within each card
+    pad = 6 * mm
+
+    # Font sizes (tuned to be "as big as possible" while still fitting reliably)
+    TITLE_SIZE = 16
+    TEAMS_SIZE = 13
+    REFS_SIZE = 11
+    FIELD_TIME_SIZE = 12
+
+    TRIES_LABEL_SIZE = 10
+    TRIES_NUM_SIZE = 18  # big; adjust higher if you want even bigger
+
+    FOOT_LABEL_SIZE = 12
+    BOX_H = 14  # box height in points
+    BOX_W = 26  # small box width (enough for 1–2 digits)
+
+    # Card draw helper
+    def draw_card(x0: float, y0: float, g: dict):
+        """
+        x0, y0 is bottom-left of card.
+        """
+        # Border
+        c.setLineWidth(1)
+        c.rect(x0, y0, card_w, card_h)
+
+        x = x0 + pad
+        y_top = y0 + card_h - pad
+
+        # Title
+        c.setFont("Helvetica-Bold", TITLE_SIZE)
+        c.drawCentredString(x0 + card_w / 2.0, y_top, "REFEREE SCORECARD")
+
+        # Divider line under title
+        c.setLineWidth(0.8)
+        c.line(x, y_top - 8, x0 + card_w - pad, y_top - 8)
+
+        # Teams (bold)
+        teams = f"{g['home_team']} vs {g['away_team']}"
+        c.setFont("Helvetica-Bold", TEAMS_SIZE)
+        c.drawCentredString(x0 + card_w / 2.0, y_top - 26, teams)
+
+        # Referees (single line)
+        refs_line = _refs_names_only_for_game(g)
+        c.setFont("Helvetica", REFS_SIZE)
+        c.drawCentredString(x0 + card_w / 2.0, y_top - 44, refs_line)
+
+        # Field @ time (compressed spacing down to here)
+        dt = dtparser.parse(g["start_dt"])
+        field_time = f"{g['field_name']} @ {_time_12h(dt)}"
+        c.setFont("Helvetica", FIELD_TIME_SIZE)
+        c.drawCentredString(x0 + card_w / 2.0, y_top - 62, field_time)
+
+        # Tries label
+        tries_y = y_top - 92
+        c.setFont("Helvetica-Bold", TRIES_LABEL_SIZE)
+        c.drawString(x, tries_y, "Tries:")
+        c.setFont("Helvetica", TRIES_LABEL_SIZE)
+        c.drawString(x + 34, tries_y, "(circle 2 numbers for a female try)")
+
+        # Tries numbers (big + spread)
+        nums_y = tries_y - 22
+        left = x
+        right = x0 + card_w - pad
+        span = right - left
+        step = span / 10.0  # 10 numbers
+        c.setFont("Helvetica-Bold", TRIES_NUM_SIZE)
+        for i in range(10):
+            n = str(i + 1)
+            cx = left + (step * (i + 0.5))
+            c.drawCentredString(cx, nums_y, n)
+
+        # Divider line under tries
+        c.setLineWidth(0.8)
+        c.line(x, nums_y - 10, x0 + card_w - pad, nums_y - 10)
+
+        # Conduct + small box
+        row1_y = nums_y - 34
+        c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
+        c.drawString(x, row1_y, "Conduct (/10)")
+        box1_x = x + 95
+        c.setLineWidth(1)
+        c.rect(box1_x, row1_y - 4, BOX_W, BOX_H)
+
+        # Unstripped Players + small box
+        row2_y = row1_y - 22
+        c.setFont("Helvetica-Bold", FOOT_LABEL_SIZE)
+        c.drawString(x, row2_y, "Unstripped Players")
+        box2_x = x + 120
+        c.rect(box2_x, row2_y - 4, BOX_W, BOX_H)
+
+    # Paginate 6 per page
+    for idx, g in enumerate(games):
+        if idx > 0 and idx % 6 == 0:
+            c.showPage()
+
+        pos = idx % 6
+        row = pos // 2  # 0..2
+        col = pos % 2   # 0..1
+
+        x0 = outer_margin + col * (card_w + gutter_x)
+        y0 = page_h - outer_margin - (row + 1) * card_h - row * gutter_y
+
+        draw_card(x0, y0, g)
+
+    c.save()
+    return buf.getvalue()
+
 
 # ============================================================
 # Offers
@@ -1609,35 +1750,60 @@ with tabs[0]:
     count_games = sum(1 for g in games if game_local_date(g) == selected_date)
     st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
 
-    # Printable PDF UI (inside Admin tab — correct indentation)
+        # Printable PDF UI (inside Admin tab — correct indentation)
     st.markdown("---")
     st.subheader("Printable Summary")
 
-    c_pdf1, c_pdf2 = st.columns([1, 2])
+    c_pdf1, c_pdf2, c_pdf3, c_pdf4 = st.columns([1, 2, 1, 2])
+
+    # Summary PDF (existing)
     with c_pdf1:
-        if st.button("Build PDF", key="build_pdf_btn"):
+        if st.button("Build Summary PDF", key="build_pdf_btn"):
             try:
                 pdf_bytes = build_admin_summary_pdf_bytes(selected_date)
                 st.session_state["admin_summary_pdf_bytes"] = pdf_bytes
-                st.success("PDF built.")
+                st.success("Summary PDF built.")
             except Exception as e:
-                st.error(f"Failed to build PDF: {e}")
+                st.error(f"Failed to build Summary PDF: {e}")
 
     with c_pdf2:
         pdf_bytes = st.session_state.get("admin_summary_pdf_bytes")
         if pdf_bytes:
             filename = f"game_summary_{selected_date.isoformat()}.pdf"
             st.download_button(
-                label="Download PDF",
+                label="Download Summary PDF",
                 data=pdf_bytes,
                 file_name=filename,
                 mime="application/pdf",
                 key="download_pdf_btn",
             )
         else:
-            st.caption("Click **Build PDF** to generate the printable schedule.")
+            st.caption("Click **Build Summary PDF** to generate the printable schedule.")
 
-    st.markdown("---")
+    # NEW: Referee Scorecards PDF
+    with c_pdf3:
+        if st.button("Build Referee Scorecards", key="build_scorecards_btn"):
+            try:
+                pdf_bytes = build_referee_scorecards_pdf_bytes(selected_date)
+                st.session_state["ref_scorecards_pdf_bytes"] = pdf_bytes
+                st.success("Scorecards PDF built.")
+            except Exception as e:
+                st.error(f"Failed to build Scorecards PDF: {e}")
+
+    with c_pdf4:
+        pdf_bytes = st.session_state.get("ref_scorecards_pdf_bytes")
+        if pdf_bytes:
+            filename = f"referee_scorecards_{selected_date.isoformat()}.pdf"
+            st.download_button(
+                label="Download Scorecards PDF",
+                data=pdf_bytes,
+                file_name=filename,
+                mime="application/pdf",
+                key="download_scorecards_btn",
+            )
+        else:
+            st.caption("Click **Build Referee Scorecards** to generate the 6-up scorecards.")
+
 
     # Games list + assignments UI
     for g in games:
