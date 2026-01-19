@@ -920,6 +920,28 @@ def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: 
 
     return [row["name"] for row in rows]
 
+def has_any_offers_for_window(start_date: date, end_date_exclusive: date) -> bool:
+    """
+    True if at least one offer exists for any assignment whose game start_dt falls within the window.
+    This is the cleanest signal that an OFFER has been sent (or at least created).
+    """
+    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
+    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
+
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM games g
+        JOIN assignments a ON a.game_id = g.id
+        JOIN offers o ON o.assignment_id = a.id
+        WHERE g.start_dt >= ? AND g.start_dt < ?
+        LIMIT 1
+        """,
+        (start_min, start_max),
+    ).fetchone()
+    conn.close()
+    return bool(row)
 
 # ============================================================
 # Printable PDF helpers
@@ -1842,21 +1864,45 @@ with tabs[0]:
             unsafe_allow_html=True,
         )
 
-    with c_list:
-        st.markdown(
-            "<div style='font-size:12px; color:#666; margin-bottom:6px;'><b>Yet to ACCEPT (unique)</b></div>",
-            unsafe_allow_html=True,
-        )
-        if not not_accepted_names:
-            st.markdown("<div style='font-size:12px; color:#2e7d32;'>All accepted ✅</div>", unsafe_allow_html=True)
+        with c_list:
+        # Only show this panel when at least one OFFER exists in the week window
+        has_offers = has_any_offers_for_window(week_start, week_end_excl)
+
+        if not has_offers:
+            # Nothing shown (prevents misleading "All accepted" when nothing offered yet)
+            st.caption("")
+
         else:
-            cols3 = st.columns(3)
-            for i, name in enumerate(not_accepted_names):
-                with cols3[i % 3]:
-                    st.markdown(
-                        f"<div style='font-size:12px; color:#ffb300; line-height:1.6;'>{name}</div>",
-                        unsafe_allow_html=True,
-                    )
+            st.markdown(
+                "<div style='font-size:12px; color:#666; margin-bottom:6px;'><b>Yet to ACCEPT (unique)</b></div>",
+                unsafe_allow_html=True,
+            )
+
+            if not not_accepted_names:
+                st.markdown(
+                    "<div style='font-size:12px; color:#2e7d32;'>All accepted ✅</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                # Horizontal list that wraps to right margin
+                items_html = ", ".join([f"<span>{n}</span>" for n in not_accepted_names])
+                st.markdown(
+                    f"""
+                    <div style="
+                        font-size:12px;
+                        color:#ffb300;
+                        line-height:1.6;
+                        display:flex;
+                        flex-wrap:wrap;
+                        gap:6px;
+                        align-items:center;
+                    ">
+                      {items_html}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
 
     # Printable PDFs
     st.markdown("---")
