@@ -5,6 +5,61 @@ import os
 import sqlite3
 import secrets
 import smtplib
+import streamlit.components.v1 as components
+
+def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
+    """
+    Persists the page scroll position (window.scrollY) in localStorage and
+    restores it after every Streamlit rerun (including st_autorefresh).
+    """
+    components.html(
+        f"""
+        <script>
+        (function() {{
+          const KEY = "{scroll_key}";
+
+          // ⛔ Install scroll listener ONLY ONCE per page load
+          if (!window.__refallocScrollInstalled) {{
+            window.__refallocScrollInstalled = true;
+
+            let ticking = false;
+            window.addEventListener("scroll", function() {{
+              if (!ticking) {{
+                window.requestAnimationFrame(function() {{
+                  try {{
+                    localStorage.setItem(KEY, String(window.scrollY || 0));
+                  }} catch (e) {{}}
+                  ticking = false;
+                }});
+                ticking = true;
+              }}
+            }}, {{ passive: true }});
+          }}
+
+          // Restore after Streamlit finishes laying out the page
+          function restore() {{
+            let y = 0;
+            try {{
+              y = parseInt(localStorage.getItem(KEY) || "0", 10) || 0;
+            }} catch (e) {{}}
+
+            const maxY = Math.max(0, document.body.scrollHeight - window.innerHeight);
+            if (y > maxY) y = maxY;
+
+            window.scrollTo(0, y);
+          }}
+
+          // Multiple delayed restores handles layout changes
+          window.setTimeout(restore, 0);
+          window.setTimeout(restore, 80);
+          window.setTimeout(restore, 200);
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
 from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
 from email.mime.text import MIMEText
@@ -1925,8 +1980,12 @@ with tabs[0]:
         index=default_idx,
         key="games_date_select",
     )
+
+    preserve_scroll(f"refalloc_admin_games_tab_{selected_date.isoformat()}")
+
     count_games = sum(1 for g in games if game_local_date(g) == selected_date)
     st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
+    
 
     # Use the SAME ISO week window you already use for acceptance progress
     week_start, week_end_excl = iso_week_window(selected_date)
