@@ -964,6 +964,36 @@ def get_assignments_for_game(game_id: int):
     conn.close()
     return rows
 
+def get_assignment_live(assignment_id: int):
+    """
+    Re-fetch the latest assignment row (and linked referee details) from the DB.
+
+    Used inside Action handlers so we don't rely on stale 'a' from the UI loop.
+    Returns sqlite3.Row or None.
+    """
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT
+            a.id,
+            a.game_id,
+            a.slot_no,
+            a.referee_id,
+            a.status,
+            a.updated_at,
+            r.name  AS ref_name,
+            r.email AS ref_email,
+            COALESCE(r.phone,'') AS ref_phone
+        FROM assignments a
+        LEFT JOIN referees r ON r.id = a.referee_id
+        WHERE a.id = ?
+        LIMIT 1
+        """,
+        (int(assignment_id),),
+    ).fetchone()
+    conn.close()
+    return row
+
         
 # ============================================================
 # Ladder / scoring helpers
