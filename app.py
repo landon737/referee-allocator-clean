@@ -1278,7 +1278,6 @@ def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
             warnings.append(f"Missing result entry: {g['home_team']} vs {g['away_team']}")
             continue
 
-        # Conduct range
         for side in ("home", "away"):
             c = int(gr[f"{side}_conduct"] or 0)
             if c < 0 or c > 10:
@@ -1286,11 +1285,13 @@ def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
                     f"Conduct out of range (0-10): {g['home_team']} vs {g['away_team']} ({side}={c})"
                 )
 
-        # Negative checks
         for k in [
-            "home_score","away_score",
-            "home_female_tries","away_female_tries",
-            "home_unstripped","away_unstripped",
+            "home_score",
+            "away_score",
+            "home_female_tries",
+            "away_female_tries",
+            "home_unstripped",
+            "away_unstripped",
         ]:
             v = int(gr[k] or 0)
             if v < 0:
@@ -1298,7 +1299,11 @@ def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
 
     return warnings
 
-    """
+
+def get_assignments_for_game(game_id: int):
+    conn = db()
+    rows = conn.execute(
+        """
         SELECT
             a.id,
             a.slot_no,
@@ -1340,6 +1345,7 @@ def get_assignment_live(assignment_id: int):
     ).fetchone()
     conn.close()
     return row
+
 
 
 def game_local_date(game_row):
