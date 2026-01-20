@@ -943,15 +943,12 @@ def has_any_offers_for_window(start_date: date, end_date_exclusive: date) -> boo
     conn.close()
     return bool(row)
 
-def get_referee_workload_for_window(start_date: date, end_date_exclusive: date) -> pd.DataFrame:
+def get_referee_workload_all_time() -> pd.DataFrame:
     """
     Returns a dataframe of all active referees and how many slots they have that are
-    ACCEPTED/ASSIGNED for games whose start_dt is within [start_date, end_date_exclusive).
+    ACCEPTED/ASSIGNED across ALL games in the database.
     Sorted least -> most.
     """
-    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
-    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
-
     conn = db()
     rows = conn.execute(
         """
@@ -961,23 +958,17 @@ def get_referee_workload_for_window(start_date: date, end_date_exclusive: date) 
             TRIM(r.email) AS email,
             SUM(
                 CASE
-                    WHEN g.id IS NOT NULL
-                     AND UPPER(COALESCE(a.status,'')) IN ('ACCEPTED','ASSIGNED')
+                    WHEN UPPER(COALESCE(a.status,'')) IN ('ACCEPTED','ASSIGNED')
                     THEN 1 ELSE 0
                 END
             ) AS accepted_slots
         FROM referees r
         LEFT JOIN assignments a
             ON a.referee_id = r.id
-        LEFT JOIN games g
-            ON g.id = a.game_id
-           AND g.start_dt >= ?
-           AND g.start_dt < ?
         WHERE r.active = 1
         GROUP BY r.id, r.name, r.email
         ORDER BY accepted_slots ASC, name ASC
-        """,
-        (start_min, start_max),
+        """
     ).fetchall()
     conn.close()
 
