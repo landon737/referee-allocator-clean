@@ -88,7 +88,24 @@ def db():
     return conn
 
 
+def ensure_referees_phone_column():
+    """
+    Safe migration: adds referees.phone if it doesn't exist.
+    Works on existing DBs without data loss.
+    """
+    conn = db()
+    try:
+        cols = conn.execute("PRAGMA table_info(referees);").fetchall()
+        col_names = {c["name"] for c in cols}
+        if "phone" not in col_names:
+            conn.execute("ALTER TABLE referees ADD COLUMN phone TEXT;")
+            conn.commit()
+    finally:
+        conn.close()
+
+
 def init_db():
+    ensure_referees_phone_column()
     conn = db()
     cur = conn.cursor()
 
@@ -515,6 +532,8 @@ def import_referees_csv(df: pd.DataFrame):
     if "name" not in cols or "email" not in cols:
         raise ValueError("Referees CSV must contain columns: name, email")
 
+    phone_col = cols.get("phone")  # optional
+
     conn = db()
     cur = conn.cursor()
     added = 0
@@ -523,19 +542,35 @@ def import_referees_csv(df: pd.DataFrame):
     for _, row in df.iterrows():
         name = str(row[cols["name"]]).strip()
         email = str(row[cols["email"]]).strip().lower()
+        phone = ""
+        if phone_col:
+            phone = str(row[phone_col]).strip()
+            if phone.lower() == "nan":
+                phone = ""
+
         if not name or not email or email == "nan":
             continue
 
-        cur.execute("SELECT id, name FROM referees WHERE email=?", (email,))
+        cur.execute("SELECT id, name, COALESCE(phone,'') AS phone FROM referees WHERE email=?", (email,))
         existing = cur.fetchone()
+
         if existing:
+            needs_update = False
             if existing["name"] != name:
-                cur.execute("UPDATE referees SET name=? WHERE email=?", (name, email))
+                needs_update = True
+            if phone_col and (existing["phone"] or "") != phone:
+                needs_update = True
+
+            if needs_update:
+                cur.execute(
+                    "UPDATE referees SET name=?, phone=? WHERE email=?",
+                    (name, phone, email),
+                )
                 updated += 1
         else:
             cur.execute(
-                "INSERT INTO referees(name, email, active) VALUES (?, ?, 1)",
-                (name, email),
+                "INSERT INTO referees(name, email, phone, active) VALUES (?, ?, ?, 1)",
+                (name, email, phone),
             )
             added += 1
 
@@ -549,13 +584,23 @@ def replace_referees_csv(df: pd.DataFrame):
     if "name" not in cols or "email" not in cols:
         raise ValueError("Referees CSV must contain columns: name, email")
 
+    phone_col = cols.get("phone")  # optional
+
     new_refs = []
     for _, row in df.iterrows():
         name = str(row[cols["name"]]).strip()
         email = str(row[cols["email"]]).strip().lower()
+
+        phone = ""
+        if phone_col:
+            phone = str(row[phone_col]).strip()
+            if phone.lower() == "nan":
+                phone = ""
+
         if not name or not email or email == "nan":
             continue
-        new_refs.append((name, email))
+
+        new_refs.append((name, email, phone))
 
     if len(new_refs) == 0:
         raise ValueError("Referees CSV has no valid rows. Aborting replace import (nothing deleted).")
@@ -581,7 +626,7 @@ def replace_referees_csv(df: pd.DataFrame):
             pass
 
         cur.executemany(
-            "INSERT INTO referees(name, email, active) VALUES (?, ?, 1)",
+            "INSERT INTO referees(name, email, phone, active) VALUES (?, ?, ?, 1)",
             new_refs,
         )
         conn.commit()
@@ -742,7 +787,7 @@ def get_referees():
     conn = db()
     rows = conn.execute(
         """
-        SELECT id, name, email
+        SELECT id, name, email, COALESCE(phone,'') AS phone
         FROM referees
         WHERE active=1
         ORDER BY name ASC
@@ -920,6 +965,7 @@ def list_referees_not_accepted_for_window(start_date: date, end_date_exclusive: 
 
     return [row["name"] for row in rows]
 
+
 def has_any_offers_for_window(start_date: date, end_date_exclusive: date) -> bool:
     """
     True if at least one offer exists for any assignment whose game start_dt falls within the window.
@@ -956,6 +1002,7 @@ def get_referee_workload_all_time() -> pd.DataFrame:
             r.id AS referee_id,
             TRIM(r.name) AS name,
             TRIM(r.email) AS email,
+            TRIM(COALESCE(r.phone,'')) AS phone,
             SUM(
                 CASE
                     WHEN UPPER(COALESCE(a.status,'')) IN ('ACCEPTED','ASSIGNED')
@@ -966,7 +1013,7 @@ def get_referee_workload_all_time() -> pd.DataFrame:
         LEFT JOIN assignments a
             ON a.referee_id = r.id
         WHERE r.active = 1
-        GROUP BY r.id, r.name, r.email
+        GROUP BY r.id, r.name, r.email, r.phone
         ORDER BY accepted_slots ASC, name ASC
         """
     ).fetchall()
@@ -976,6 +1023,7 @@ def get_referee_workload_all_time() -> pd.DataFrame:
         [
             {
                 "Referee": (row["name"] or "").strip() or "—",
+                "Phone": (row["phone"] or "").strip() or "—",
                 "Email": (row["email"] or "").strip() or "—",
                 "Accepted": int(row["accepted_slots"] or 0),
             }
@@ -984,7 +1032,7 @@ def get_referee_workload_all_time() -> pd.DataFrame:
     )
 
     if df.empty:
-        df = pd.DataFrame(columns=["Referee", "Email", "Accepted"])
+        df = pd.DataFrame(columns=["Referee", "Phone", "Email", "Accepted"])
 
     return df
 
@@ -1739,7 +1787,7 @@ with tabs[1]:
     st.markdown("---")
 
     st.markdown("### Referees CSV")
-    st.caption("Required columns: name, email")
+    st.caption("Required columns: name, email  (optional: phone)")
 
     replace_mode = st.checkbox(
         "Replace ALL referees with this CSV (overwrite existing list)",
