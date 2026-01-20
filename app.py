@@ -101,8 +101,39 @@ if DEBUG_BANNER:
 
 
 # ============================================================
+# ⚠️ CORE HELPERS — DO NOT MOVE BELOW THIS LINE
+# ============================================================
+
+# ============================================================
 # Small utilities
 # ============================================================
+def game_local_date(game_row) -> date:
+    """
+    Returns the local calendar date for a game row.
+    Expects game_row to have 'start_dt' (ISO string).
+    """
+    dt = dtparser.parse(game_row["start_dt"])
+    return dt.date()
+
+
+def referee_has_blackout(ref_id: int, d: date) -> bool:
+    """
+    Returns True if the referee has a blackout on the given date.
+    """
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM blackouts
+        WHERE referee_id=? AND blackout_date=?
+        LIMIT 1
+        """,
+        (ref_id, d.isoformat()),
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -128,15 +159,6 @@ def status_badge(text: str, bg: str, fg: str = "white"):
 
 def _time_12h(dt: datetime) -> str:
     return dt.strftime("%I:%M %p").lstrip("0")
-
-
-def game_local_date(game_row) -> date:
-    """
-    Returns the local calendar date for a game row.
-    Expects game_row to have 'start_dt' (ISO string).
-    """
-    dt = dtparser.parse(game_row["start_dt"])
-    return dt.date()
 
 
 # ============================================================
