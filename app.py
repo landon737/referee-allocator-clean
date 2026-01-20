@@ -1900,9 +1900,9 @@ with tabs[0]:
     # ----------------------------
     with side_col:
         st.markdown("### Referee workload")
-        st.caption(f"ISO week: {week_start.isoformat()} → {(week_end_excl - timedelta(days=1)).isoformat()}")
+        st.caption("All-time accepted/assigned (all games)")
+        df_work = get_referee_workload_all_time()
 
-        df_work = get_referee_workload_for_window(week_start, week_end_excl)
 
         if df_work.empty:
             st.info("No referees found.")
