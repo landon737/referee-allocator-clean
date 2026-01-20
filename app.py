@@ -905,7 +905,9 @@ def get_referees():
 
 def get_assignments_for_game(game_id: int):
     conn = db()
-    rows = conn.execute(# ============================================================
+    rows = conn.execute(
+        
+# ============================================================
 # Ladder / scoring helpers
 # ============================================================
 
