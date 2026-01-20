@@ -906,6 +906,25 @@ def get_referees():
 def get_assignments_for_game(game_id: int):
     conn = db()
     rows = conn.execute(
+        """
+        SELECT
+            a.id,
+            a.slot_no,
+            a.referee_id,
+            a.status,
+            a.updated_at,
+            r.name AS ref_name,
+            r.email AS ref_email
+        FROM assignments a
+        LEFT JOIN referees r ON r.id = a.referee_id
+        WHERE a.game_id=?
+        ORDER BY a.slot_no ASC
+        """,
+        (game_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
         
 # ============================================================
 # Ladder / scoring helpers
@@ -2198,356 +2217,6 @@ admin_logout_button()
 
 tabs = st.tabs(["Admin", "Ladder", "Import", "Blackouts", "Administrators"])
 
-
-# ============================================================
-# Administrators tab
-# ============================================================
-with tabs[3]:
-    st.subheader("Administrators (allowlist)")
-    st.caption("Add/remove admins by email. Removed admins lose access immediately.")
-
-    admins = list_admins()
-    if admins:
-        df_admins = pd.DataFrame(
-            [
-                {
-                    "email": a["email"],
-                    "active": "YES" if a["active"] == 1 else "NO",
-                    "created_at": a["created_at"],
-                }
-                for a in admins
-            ]
-        )
-        st.dataframe(df_admins, use_container_width=True)
-
-    st.markdown("### Add admin")
-    new_admin = st.text_input("Email to add", key="add_admin_email")
-    if st.button("Add admin", key="add_admin_btn"):
-        if not new_admin.strip():
-            st.error("Enter an email.")
-        else:
-            add_admin(new_admin)
-            st.success("Admin added (or already existed).")
-            st.rerun()
-
-    st.markdown("### Remove/disable admin")
-    active_emails = [a["email"] for a in admins if a["active"] == 1]
-    if active_emails:
-        disable_email = st.selectbox("Select admin to disable", active_emails, key="disable_admin_select")
-        if st.button("Disable selected admin", key="disable_admin_btn"):
-            if disable_email == st.session_state.get("admin_email"):
-                st.error("You can't disable yourself while logged in.")
-            else:
-                set_admin_active(disable_email, False)
-                st.success("Admin disabled.")
-                st.rerun()
-    else:
-        st.info("No active admins found (you should add at least one).")
-
-# ============================================================
-# Ladder tab
-# ============================================================
-with tabs[1]:
-    st.subheader("Competition Ladder (Admin)")
-    st.caption("Enter team divisions + game results, then view ladder + audit breakdown for fault finding.")
-
-    games = get_games()
-    if not games:
-        st.info("Import a Games CSV first.")
-        st.stop()
-
-    all_dates = sorted({game_local_date(g) for g in games})
-    if not all_dates:
-        st.info("No game dates found.")
-        st.stop()
-
-    today = date.today()
-    default_idx = 0
-    for i, d in enumerate(all_dates):
-        if d >= today:
-            default_idx = i
-            break
-
-    selected_date = st.selectbox(
-        "Ladder date",
-        all_dates,
-        index=default_idx,
-        key="ladder_date_select",
-    )
-
-    todays_games = [g for g in games if game_local_date(g) == selected_date]
-    st.caption(f"{len(todays_games)} game(s) on {selected_date.isoformat()}")
-
-    st.markdown("---")
-    st.markdown("### 1) Team divisions")
-
-    # Quick-add/update divisions for any teams that appear today
-    teams_today = sorted({(g["home_team"] or "").strip() for g in todays_games} | {(g["away_team"] or "").strip() for g in todays_games})
-    teams_today = [t for t in teams_today if t]
-
-    existing = {t["name"]: t["division"] for t in list_teams()}
-
-    if not teams_today:
-        st.info("No teams found for this date.")
-        st.stop()
-
-    div_col1, div_col2 = st.columns([2, 1], gap="large")
-
-    with div_col1:
-        st.write("Set division per team (saved immediately).")
-        for t in teams_today:
-            current = (existing.get(t) or "").strip()
-            key = f"div_{selected_date.isoformat()}_{t}"
-            new_val = st.text_input(f"{t}", value=current, key=key, placeholder="e.g. Division 1")
-            if new_val.strip() and new_val.strip() != current:
-                upsert_team(t, new_val.strip())
-                # refresh local cache
-                existing[t] = new_val.strip()
-
-    with div_col2:
-        st.write("Teams (today)")
-        st.dataframe(
-            pd.DataFrame([{"Team": t, "Division": (existing.get(t) or "").strip() or "—"} for t in teams_today]),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    st.markdown("---")
-    st.markdown("### 2) Enter game results (scores + referee inputs)")
-
-    if not todays_games:
-        st.info("No games found for this date.")
-        st.stop()
-
-    for g in todays_games:
-        start_dt = dtparser.parse(g["start_dt"])
-        title = f"{g['home_team']} vs {g['away_team']} — {g['field_name']} @ {_time_12h(start_dt)}"
-
-        gr = get_game_result(int(g["id"]))
-
-        # Defaults
-        d_home_score = int(gr["home_score"]) if gr else 0
-        d_away_score = int(gr["away_score"]) if gr else 0
-
-        d_hft = int(gr["home_female_tries"]) if gr else 0
-        d_aft = int(gr["away_female_tries"]) if gr else 0
-
-        d_hc = int(gr["home_conduct"]) if gr else 0
-        d_ac = int(gr["away_conduct"]) if gr else 0
-
-        d_hu = int(gr["home_unstripped"]) if gr else 0
-        d_au = int(gr["away_unstripped"]) if gr else 0
-
-        with st.container(border=True):
-            st.markdown(f"**{title}**")
-
-            c1, c2, c3 = st.columns([1, 1, 1], gap="large")
-
-            with c1:
-                st.markdown("**Score**")
-                home_score = st.number_input(f"{g['home_team']} score", min_value=0, step=1, value=d_home_score, key=f"hs_{g['id']}")
-                away_score = st.number_input(f"{g['away_team']} score", min_value=0, step=1, value=d_away_score, key=f"as_{g['id']}")
-
-            with c2:
-                st.markdown("**Female tries**")
-                home_ft = st.number_input(f"{g['home_team']} female tries", min_value=0, step=1, value=d_hft, key=f"hft_{g['id']}")
-                away_ft = st.number_input(f"{g['away_team']} female tries", min_value=0, step=1, value=d_aft, key=f"aft_{g['id']}")
-
-            with c3:
-                st.markdown("**Conduct / Unstripped**")
-                home_conduct = st.number_input(f"{g['home_team']} conduct (/10)", min_value=0, max_value=10, step=1, value=d_hc, key=f"hc_{g['id']}")
-                away_conduct = st.number_input(f"{g['away_team']} conduct (/10)", min_value=0, max_value=10, step=1, value=d_ac, key=f"ac_{g['id']}")
-
-                home_un = st.number_input(f"{g['home_team']} unstripped", min_value=0, step=1, value=d_hu, key=f"hu_{g['id']}")
-                away_un = st.number_input(f"{g['away_team']} unstripped", min_value=0, step=1, value=d_au, key=f"au_{g['id']}")
-
-            save_key = f"save_res_{g['id']}"
-            if st.button("Save result", key=save_key):
-                upsert_game_result(
-                    game_id=int(g["id"]),
-                    home_score=int(home_score),
-                    away_score=int(away_score),
-                    home_female_tries=int(home_ft),
-                    away_female_tries=int(away_ft),
-                    home_conduct=int(home_conduct),
-                    away_conduct=int(away_conduct),
-                    home_unstripped=int(home_un),
-                    away_unstripped=int(away_un),
-                )
-                st.success("Saved.")
-                st.rerun()
-
-    st.markdown("---")
-    st.markdown("### 3) Ladder + audit (fault finding)")
-
-    warnings = ladder_validation_warnings_for_date(selected_date)
-    if warnings:
-        st.warning("Warnings:\n- " + "\n- ".join(warnings))
-
-    df_audit = ladder_audit_df_for_date(selected_date)
-    if df_audit.empty:
-        st.info("No audit rows yet. Enter at least one result above.")
-        st.stop()
-
-    divisions = sorted([d for d in df_audit["Division"].unique().tolist() if d and d != "—"])
-    if not divisions:
-        divisions = ["—"]
-
-    div_choice = st.selectbox("Division", divisions, key="ladder_div_select")
-
-    df_ladder = ladder_table_df_for_date(selected_date, div_choice)
-    if df_ladder.empty:
-        st.info("No ladder rows for this division/date.")
-    else:
-        st.markdown("#### Ladder")
-        st.dataframe(df_ladder, use_container_width=True, hide_index=True)
-
-        st.download_button(
-            "Download ladder CSV",
-            data=df_ladder.to_csv(index=False).encode("utf-8"),
-            file_name=f"ladder_{div_choice}_{selected_date.isoformat()}.csv".replace(" ", "_"),
-            mime="text/csv",
-            key="ladder_csv_btn",
-        )
-
-    st.markdown("#### Audit table (per team per game)")
-    df_audit_show = df_audit[df_audit["Division"].fillna("—") == (div_choice or "—")]
-    st.dataframe(df_audit_show, use_container_width=True, hide_index=True)
-
-    st.download_button(
-        "Download audit CSV",
-        data=df_audit_show.to_csv(index=False).encode("utf-8"),
-        file_name=f"audit_{div_choice}_{selected_date.isoformat()}.csv".replace(" ", "_"),
-        mime="text/csv",
-        key="audit_csv_btn",
-    )
-
-
-# ============================================================
-# Import tab
-# ============================================================
-with tabs[1]:
-    st.subheader("Import CSVs")
-
-    st.markdown("### Games CSV")
-    st.caption("Required columns: game_id, date, start_time, home_team, away_team, field")
-
-    games_file = st.file_uploader("Upload Games CSV", type=["csv"], key="games_csv")
-    if games_file:
-        df_games = pd.read_csv(games_file)
-        st.dataframe(df_games.head(20), use_container_width=True)
-        if st.button("Import Games", key="import_games_btn"):
-            ins, upd = import_games_csv(df_games)
-            st.success(f"Imported games. Inserted: {ins}, Updated: {upd}")
-            st.rerun()
-
-    st.markdown("---")
-
-    st.markdown("### Referees CSV")
-    st.caption("Required columns: name, email  (optional: phone)")
-
-    replace_mode = st.checkbox(
-        "Replace ALL referees with this CSV (overwrite existing list)",
-        value=False,
-        key="replace_refs_mode",
-    )
-
-    refs_file = st.file_uploader("Upload Referees CSV", type=["csv"], key="refs_csv")
-    if refs_file:
-        df_refs = pd.read_csv(refs_file)
-        st.dataframe(df_refs.head(20), use_container_width=True)
-
-        if st.button("Import Referees", key="import_refs_btn"):
-            try:
-                if replace_mode:
-                    count = replace_referees_csv(df_refs)
-                    st.success(
-                        f"Replaced referee list successfully. Imported {count} referee(s). "
-                        "All assignments were reset to EMPTY."
-                    )
-                    for k in [k for k in st.session_state.keys() if str(k).startswith("refpick_")]:
-                        st.session_state.pop(k, None)
-                else:
-                    added, updated = import_referees_csv(df_refs)
-                    st.success(f"Imported referees. Added: {added}, Updated: {updated}")
-
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-    st.markdown("---")
-
-    st.markdown("### Blackouts CSV (optional)")
-    st.caption("Required columns: email, blackout_date")
-
-    bl_file = st.file_uploader("Upload Blackouts CSV", type=["csv"], key="bl_csv")
-    if bl_file:
-        df_bl = pd.read_csv(bl_file)
-        st.dataframe(df_bl.head(20), use_container_width=True)
-        if st.button("Import Blackouts", key="import_bl_btn"):
-            added, skipped = import_blackouts_csv(df_bl)
-            st.success(f"Imported blackouts. Added: {added}. Skipped: {skipped}")
-            st.rerun()
-
-
-# ============================================================
-# Blackouts tab
-# ============================================================
-with tabs[2]:
-    st.subheader("Manage Blackout Dates (date-only)")
-
-    refs = get_referees()
-    if not refs:
-        st.info("Import referees first.")
-    else:
-        ref_map = {f"{r['name']} ({r['email']})": r["id"] for r in refs}
-        choice = st.selectbox("Select referee", list(ref_map.keys()), key="blackout_ref_select")
-        ref_id = ref_map[choice]
-
-        add_date = st.date_input("Add blackout date", value=date.today(), key="blackout_add_date")
-        if st.button("Add date", key="blackout_add_btn"):
-            conn = db()
-            try:
-                conn.execute(
-                    "INSERT INTO blackouts(referee_id, blackout_date) VALUES (?, ?)",
-                    (ref_id, add_date.isoformat()),
-                )
-                conn.commit()
-                st.success("Added blackout date.")
-            except sqlite3.IntegrityError:
-                st.warning("That date is already in the blackout list.")
-            finally:
-                conn.close()
-
-        st.markdown("### Current blackout dates")
-        conn = db()
-        rows = conn.execute(
-            """
-            SELECT blackout_date FROM blackouts
-            WHERE referee_id=?
-            ORDER BY blackout_date ASC
-            """,
-            (ref_id,),
-        ).fetchall()
-        conn.close()
-
-        if rows:
-            dates = [r["blackout_date"] for r in rows]
-            del_date = st.selectbox("Remove blackout date", dates, key="blackout_del_select")
-            if st.button("Remove selected date", key="blackout_del_btn"):
-                conn = db()
-                conn.execute(
-                    "DELETE FROM blackouts WHERE referee_id=? AND blackout_date=?",
-                    (ref_id, del_date),
-                )
-                conn.commit()
-                conn.close()
-                st.success("Removed.")
-                st.rerun()
-        else:
-            st.caption("No blackout dates set.")
-
-
 # ============================================================
 # Admin tab
 # ============================================================
@@ -2587,40 +2256,24 @@ with tabs[0]:
 
     count_games = sum(1 for g in games if game_local_date(g) == selected_date)
     st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
-    
 
-    # Use the SAME ISO week window you already use for acceptance progress
     week_start, week_end_excl = iso_week_window(selected_date)
 
-    # Two-column layout: main content (left) + workload panel (right)
     main_col, side_col = st.columns([3, 1], gap="large")
 
-    # ----------------------------
-    # RIGHT-HAND WORKLOAD PANEL
-    # ----------------------------
     with side_col:
         st.markdown("### Referee workload")
         st.caption("All-time accepted/assigned (all games)")
         df_work = get_referee_workload_all_time()
 
-
         if df_work.empty:
             st.info("No referees found.")
         else:
-            st.dataframe(
-                df_work,
-                use_container_width=True,
-                hide_index=True,
-            )
-
+            st.dataframe(df_work, use_container_width=True, hide_index=True)
             total_acc = int(df_work["Accepted"].sum()) if "Accepted" in df_work.columns else 0
             st.caption(f"Total accepted/assigned slots (all-time): {total_acc}")
 
-    # ----------------------------
-    # MAIN (LEFT) CONTENT
-    # ----------------------------
     with main_col:
-        # Acceptance progress UI (existing)
         accepted_slots, total_slots = get_acceptance_progress_for_window(week_start, week_end_excl)
 
         pct = (accepted_slots / total_slots) if total_slots else 0.0
@@ -2689,7 +2342,6 @@ with tabs[0]:
                         unsafe_allow_html=True,
                     )
 
-        # Printable PDFs (existing)
         st.markdown("---")
         st.subheader("Printable Summary")
 
@@ -2741,7 +2393,6 @@ with tabs[0]:
             else:
                 st.caption("Click **Build Referee Scorecards** to generate the 6-up scorecards.")
 
-        # Games list + assignments UI (existing)
         for g in games:
             if game_local_date(g) != selected_date:
                 continue
@@ -2916,3 +2567,393 @@ with tabs[0]:
 
                         if st.session_state.get(msg_key):
                             st.info(st.session_state[msg_key])
+
+# ============================================================
+# Ladder tab
+# ============================================================
+with tabs[1]:
+    st.subheader("Competition Ladder (Admin)")
+    st.caption("Enter team divisions + game results, then view ladder + audit breakdown for fault finding.")
+
+    games = get_games()
+    if not games:
+        st.info("Import a Games CSV first.")
+        st.stop()
+
+    all_dates = sorted({game_local_date(g) for g in games})
+    if not all_dates:
+        st.info("No game dates found.")
+        st.stop()
+
+    today = date.today()
+    default_idx = 0
+    for i, d in enumerate(all_dates):
+        if d >= today:
+            default_idx = i
+            break
+
+    selected_date = st.selectbox(
+        "Ladder date",
+        all_dates,
+        index=default_idx,
+        key="ladder_date_select",
+    )
+
+    todays_games = [g for g in games if game_local_date(g) == selected_date]
+    st.caption(f"{len(todays_games)} game(s) on {selected_date.isoformat()}")
+
+    st.markdown("---")
+    st.markdown("### 1) Team divisions")
+
+    teams_today = sorted(
+        {(g["home_team"] or "").strip() for g in todays_games}
+        | {(g["away_team"] or "").strip() for g in todays_games}
+    )
+    teams_today = [t for t in teams_today if t]
+
+    existing = {t["name"]: t["division"] for t in list_teams()}
+
+    if not teams_today:
+        st.info("No teams found for this date.")
+        st.stop()
+
+    div_col1, div_col2 = st.columns([2, 1], gap="large")
+
+    with div_col1:
+        st.write("Set division per team (saved immediately).")
+        for t in teams_today:
+            current = (existing.get(t) or "").strip()
+            key = f"div_{selected_date.isoformat()}_{t}"
+            new_val = st.text_input(f"{t}", value=current, key=key, placeholder="e.g. Division 1")
+            if new_val.strip() and new_val.strip() != current:
+                upsert_team(t, new_val.strip())
+                existing[t] = new_val.strip()
+
+    with div_col2:
+        st.write("Teams (today)")
+        st.dataframe(
+            pd.DataFrame([{"Team": t, "Division": (existing.get(t) or "").strip() or "—"} for t in teams_today]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("---")
+    st.markdown("### 2) Enter game results (scores + referee inputs)")
+
+    if not todays_games:
+        st.info("No games found for this date.")
+        st.stop()
+
+    for g in todays_games:
+        start_dt = dtparser.parse(g["start_dt"])
+        title = f"{g['home_team']} vs {g['away_team']} — {g['field_name']} @ {_time_12h(start_dt)}"
+
+        gr = get_game_result(int(g["id"]))
+
+        d_home_score = int(gr["home_score"]) if gr else 0
+        d_away_score = int(gr["away_score"]) if gr else 0
+        d_hft = int(gr["home_female_tries"]) if gr else 0
+        d_aft = int(gr["away_female_tries"]) if gr else 0
+        d_hc = int(gr["home_conduct"]) if gr else 0
+        d_ac = int(gr["away_conduct"]) if gr else 0
+        d_hu = int(gr["home_unstripped"]) if gr else 0
+        d_au = int(gr["away_unstripped"]) if gr else 0
+
+        with st.container(border=True):
+            st.markdown(f"**{title}**")
+
+            c1, c2, c3 = st.columns([1, 1, 1], gap="large")
+
+            with c1:
+                st.markdown("**Score**")
+                home_score = st.number_input(
+                    f"{g['home_team']} score",
+                    min_value=0,
+                    step=1,
+                    value=d_home_score,
+                    key=f"hs_{g['id']}",
+                )
+                away_score = st.number_input(
+                    f"{g['away_team']} score",
+                    min_value=0,
+                    step=1,
+                    value=d_away_score,
+                    key=f"as_{g['id']}",
+                )
+
+            with c2:
+                st.markdown("**Female tries**")
+                home_ft = st.number_input(
+                    f"{g['home_team']} female tries",
+                    min_value=0,
+                    step=1,
+                    value=d_hft,
+                    key=f"hft_{g['id']}",
+                )
+                away_ft = st.number_input(
+                    f"{g['away_team']} female tries",
+                    min_value=0,
+                    step=1,
+                    value=d_aft,
+                    key=f"aft_{g['id']}",
+                )
+
+            with c3:
+                st.markdown("**Conduct / Unstripped**")
+                home_conduct = st.number_input(
+                    f"{g['home_team']} conduct (/10)",
+                    min_value=0,
+                    max_value=10,
+                    step=1,
+                    value=d_hc,
+                    key=f"hc_{g['id']}",
+                )
+                away_conduct = st.number_input(
+                    f"{g['away_team']} conduct (/10)",
+                    min_value=0,
+                    max_value=10,
+                    step=1,
+                    value=d_ac,
+                    key=f"ac_{g['id']}",
+                )
+
+                home_un = st.number_input(
+                    f"{g['home_team']} unstripped",
+                    min_value=0,
+                    step=1,
+                    value=d_hu,
+                    key=f"hu_{g['id']}",
+                )
+                away_un = st.number_input(
+                    f"{g['away_team']} unstripped",
+                    min_value=0,
+                    step=1,
+                    value=d_au,
+                    key=f"au_{g['id']}",
+                )
+
+            if st.button("Save result", key=f"save_res_{g['id']}"):
+                upsert_game_result(
+                    game_id=int(g["id"]),
+                    home_score=int(home_score),
+                    away_score=int(away_score),
+                    home_female_tries=int(home_ft),
+                    away_female_tries=int(away_ft),
+                    home_conduct=int(home_conduct),
+                    away_conduct=int(away_conduct),
+                    home_unstripped=int(home_un),
+                    away_unstripped=int(away_un),
+                )
+                st.success("Saved.")
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 3) Ladder + audit (fault finding)")
+
+    warnings = ladder_validation_warnings_for_date(selected_date)
+    if warnings:
+        st.warning("Warnings:\n- " + "\n- ".join(warnings))
+
+    df_audit = ladder_audit_df_for_date(selected_date)
+    if df_audit.empty:
+        st.info("No audit rows yet. Enter at least one result above.")
+        st.stop()
+
+    divisions = sorted([d for d in df_audit["Division"].unique().tolist() if d and d != "—"])
+    if not divisions:
+        divisions = ["—"]
+
+    div_choice = st.selectbox("Division", divisions, key="ladder_div_select")
+
+    df_ladder = ladder_table_df_for_date(selected_date, div_choice)
+    if df_ladder.empty:
+        st.info("No ladder rows for this division/date.")
+    else:
+        st.markdown("#### Ladder")
+        st.dataframe(df_ladder, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download ladder CSV",
+            data=df_ladder.to_csv(index=False).encode("utf-8"),
+            file_name=f"ladder_{div_choice}_{selected_date.isoformat()}.csv".replace(" ", "_"),
+            mime="text/csv",
+            key="ladder_csv_btn",
+        )
+
+    st.markdown("#### Audit table (per team per game)")
+    df_audit_show = df_audit[df_audit["Division"].fillna("—") == (div_choice or "—")]
+    st.dataframe(df_audit_show, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download audit CSV",
+        data=df_audit_show.to_csv(index=False).encode("utf-8"),
+        file_name=f"audit_{div_choice}_{selected_date.isoformat()}.csv".replace(" ", "_"),
+        mime="text/csv",
+        key="audit_csv_btn",
+    )
+
+# ============================================================
+# Import tab
+# ============================================================
+with tabs[2]:
+    st.subheader("Import CSVs")
+
+    st.markdown("### Games CSV")
+    st.caption("Required columns: game_id, date, start_time, home_team, away_team, field")
+
+    games_file = st.file_uploader("Upload Games CSV", type=["csv"], key="games_csv")
+    if games_file:
+        df_games = pd.read_csv(games_file)
+        st.dataframe(df_games.head(20), use_container_width=True)
+        if st.button("Import Games", key="import_games_btn"):
+            ins, upd = import_games_csv(df_games)
+            st.success(f"Imported games. Inserted: {ins}, Updated: {upd}")
+            st.rerun()
+
+    st.markdown("---")
+
+    st.markdown("### Referees CSV")
+    st.caption("Required columns: name, email  (optional: phone)")
+
+    replace_mode = st.checkbox(
+        "Replace ALL referees with this CSV (overwrite existing list)",
+        value=False,
+        key="replace_refs_mode",
+    )
+
+    refs_file = st.file_uploader("Upload Referees CSV", type=["csv"], key="refs_csv")
+    if refs_file:
+        df_refs = pd.read_csv(refs_file)
+        st.dataframe(df_refs.head(20), use_container_width=True)
+
+        if st.button("Import Referees", key="import_refs_btn"):
+            try:
+                if replace_mode:
+                    count = replace_referees_csv(df_refs)
+                    st.success(
+                        f"Replaced referee list successfully. Imported {count} referee(s). "
+                        "All assignments were reset to EMPTY."
+                    )
+                    for k in [k for k in st.session_state.keys() if str(k).startswith("refpick_")]:
+                        st.session_state.pop(k, None)
+                else:
+                    added, updated = import_referees_csv(df_refs)
+                    st.success(f"Imported referees. Added: {added}, Updated: {updated}")
+
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    st.markdown("---")
+
+    st.markdown("### Blackouts CSV (optional)")
+    st.caption("Required columns: email, blackout_date")
+
+    bl_file = st.file_uploader("Upload Blackouts CSV", type=["csv"], key="bl_csv")
+    if bl_file:
+        df_bl = pd.read_csv(bl_file)
+        st.dataframe(df_bl.head(20), use_container_width=True)
+        if st.button("Import Blackouts", key="import_bl_btn"):
+            added, skipped = import_blackouts_csv(df_bl)
+            st.success(f"Imported blackouts. Added: {added}. Skipped: {skipped}")
+            st.rerun()
+
+# ============================================================
+# Blackouts tab
+# ============================================================
+with tabs[3]:
+    st.subheader("Manage Blackout Dates (date-only)")
+
+    refs = get_referees()
+    if not refs:
+        st.info("Import referees first.")
+    else:
+        ref_map = {f"{r['name']} ({r['email']})": r["id"] for r in refs}
+        choice = st.selectbox("Select referee", list(ref_map.keys()), key="blackout_ref_select")
+        ref_id = ref_map[choice]
+
+        add_date = st.date_input("Add blackout date", value=date.today(), key="blackout_add_date")
+        if st.button("Add date", key="blackout_add_btn"):
+            conn = db()
+            try:
+                conn.execute(
+                    "INSERT INTO blackouts(referee_id, blackout_date) VALUES (?, ?)",
+                    (ref_id, add_date.isoformat()),
+                )
+                conn.commit()
+                st.success("Added blackout date.")
+            except sqlite3.IntegrityError:
+                st.warning("That date is already in the blackout list.")
+            finally:
+                conn.close()
+
+        st.markdown("### Current blackout dates")
+        conn = db()
+        rows = conn.execute(
+            """
+            SELECT blackout_date FROM blackouts
+            WHERE referee_id=?
+            ORDER BY blackout_date ASC
+            """,
+            (ref_id,),
+        ).fetchall()
+        conn.close()
+
+        if rows:
+            dates = [r["blackout_date"] for r in rows]
+            del_date = st.selectbox("Remove blackout date", dates, key="blackout_del_select")
+            if st.button("Remove selected date", key="blackout_del_btn"):
+                conn = db()
+                conn.execute(
+                    "DELETE FROM blackouts WHERE referee_id=? AND blackout_date=?",
+                    (ref_id, del_date),
+                )
+                conn.commit()
+                conn.close()
+                st.success("Removed.")
+                st.rerun()
+        else:
+            st.caption("No blackout dates set.")
+
+# ============================================================
+# Administrators tab
+# ============================================================
+with tabs[4]:
+    st.subheader("Administrators (allowlist)")
+    st.caption("Add/remove admins by email. Removed admins lose access immediately.")
+
+    admins = list_admins()
+    if admins:
+        df_admins = pd.DataFrame(
+            [
+                {
+                    "email": a["email"],
+                    "active": "YES" if a["active"] == 1 else "NO",
+                    "created_at": a["created_at"],
+                }
+                for a in admins
+            ]
+        )
+        st.dataframe(df_admins, use_container_width=True)
+
+    st.markdown("### Add admin")
+    new_admin = st.text_input("Email to add", key="add_admin_email")
+    if st.button("Add admin", key="add_admin_btn"):
+        if not new_admin.strip():
+            st.error("Enter an email.")
+        else:
+            add_admin(new_admin)
+            st.success("Admin added (or already existed).")
+            st.rerun()
+
+    st.markdown("### Remove/disable admin")
+    active_emails = [a["email"] for a in admins if a["active"] == 1]
+    if active_emails:
+        disable_email = st.selectbox("Select admin to disable", active_emails, key="disable_admin_select")
+        if st.button("Disable selected admin", key="disable_admin_btn"):
+            if disable_email == st.session_state.get("admin_email"):
+                st.error("You can't disable yourself while logged in.")
+            else:
+                set_admin_active(disable_email, False)
+                st.success("Admin disabled.")
+                st.rerun()
+    else:
+        st.info("No active admins found (you should add at least one).")
