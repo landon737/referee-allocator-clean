@@ -954,6 +954,7 @@ def upsert_team(name: str, division: str):
     finally:
         conn.close()
 
+    
 
 def list_teams() -> list[sqlite3.Row]:
     conn = db()
@@ -2627,18 +2628,36 @@ with tabs[1]:
 
     with div_col1:
         st.write("Set division per team (saved immediately).")
+
+        DIVISIONS = [
+            "Division 1",
+            "Division 2",
+            "Division 3",
+            "Golden Oldies",
+            "Other",
+        ]
+
         for t in teams_today:
-            current = (existing.get(t) or "").strip()
-            key = f"div_{selected_date.isoformat()}_{t}"
-            new_val = st.text_input(f"{t}", value=current, key=key, placeholder="e.g. Division 1")
-            if new_val.strip() and new_val.strip() != current:
-                upsert_team(t, new_val.strip())
-                existing[t] = new_val.strip()
+            current_div = (existing.get(t) or "").strip()
+            default_idx = DIVISIONS.index(current_div) if current_div in DIVISIONS else 0
+
+            new_div = st.selectbox(
+                label=t,
+                options=DIVISIONS,
+                index=default_idx,
+                key=f"div_select_{selected_date.isoformat()}_{t}",
+            )
+
+            if new_div != current_div:
+                upsert_team(t, new_div)
+                existing[t] = new_div
 
     with div_col2:
         st.write("Teams (today)")
         st.dataframe(
-            pd.DataFrame([{"Team": t, "Division": (existing.get(t) or "").strip() or "—"} for t in teams_today]),
+            pd.DataFrame(
+                [{"Team": t, "Division": (existing.get(t) or "").strip() or "—"} for t in teams_today]
+            ),
             use_container_width=True,
             hide_index=True,
         )
@@ -2658,10 +2677,13 @@ with tabs[1]:
 
         d_home_score = int(gr["home_score"]) if gr else 0
         d_away_score = int(gr["away_score"]) if gr else 0
+
         d_hft = int(gr["home_female_tries"]) if gr else 0
         d_aft = int(gr["away_female_tries"]) if gr else 0
+
         d_hc = int(gr["home_conduct"]) if gr else 0
         d_ac = int(gr["away_conduct"]) if gr else 0
+
         d_hu = int(gr["home_unstripped"]) if gr else 0
         d_au = int(gr["away_unstripped"]) if gr else 0
 
@@ -2777,6 +2799,7 @@ with tabs[1]:
     else:
         st.markdown("#### Ladder")
         st.dataframe(df_ladder, use_container_width=True, hide_index=True)
+
         st.download_button(
             "Download ladder CSV",
             data=df_ladder.to_csv(index=False).encode("utf-8"),
@@ -2788,6 +2811,7 @@ with tabs[1]:
     st.markdown("#### Audit table (per team per game)")
     df_audit_show = df_audit[df_audit["Division"].fillna("—") == (div_choice or "—")]
     st.dataframe(df_audit_show, use_container_width=True, hide_index=True)
+
     st.download_button(
         "Download audit CSV",
         data=df_audit_show.to_csv(index=False).encode("utf-8"),
@@ -2795,6 +2819,7 @@ with tabs[1]:
         mime="text/csv",
         key="audit_csv_btn",
     )
+
 
 # ============================================================
 # Import tab
