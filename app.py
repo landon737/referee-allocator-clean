@@ -2670,39 +2670,39 @@ with tabs[1]:
                 existing[t] = {"division": new_div, "opening": int(new_open)}
 
     with div_col2:
-    st.write("Teams (today)")
+        st.write("Teams (today)")
 
-    df_teams_today = pd.DataFrame(
-        [
-            {
-                "Team": t,
-                "Division": (existing.get(t, {}).get("division") or "").strip() or "—",
-                "Opening": int(existing.get(t, {}).get("opening") or 0),
-            }
-            for t in teams_today
-        ]
-    )
-
-    if df_teams_today.empty:
-        st.caption("No teams found.")
-    else:
-        # Sort: Division (asc), Opening (desc), Team (asc)
-        df_teams_today = df_teams_today.sort_values(
-            by=["Division", "Opening", "Team"],
-            ascending=[True, False, True],
-        ).reset_index(drop=True)
-
-        # Fit height so there's no internal scroll bar
-        # ~35px per row + header padding is a good Streamlit rule of thumb
-        row_h = 35
-        height = min(900, (len(df_teams_today) + 1) * row_h + 10)
-
-        st.dataframe(
-            df_teams_today,
-            use_container_width=True,
-            hide_index=True,
-            height=height,
+        df_teams_today = pd.DataFrame(
+            [
+                {
+                    "Team": t,
+                    "Division": (existing.get(t, {}).get("division") or "").strip() or "—",
+                    "Opening": int(existing.get(t, {}).get("opening") or 0),
+                }
+                for t in teams_today
+            ]
         )
+
+        if df_teams_today.empty:
+            st.caption("No teams found.")
+        else:
+            # Sort: Division (asc), Opening (desc), Team (asc)
+            df_teams_today = df_teams_today.sort_values(
+                by=["Division", "Opening", "Team"],
+                ascending=[True, False, True],
+            ).reset_index(drop=True)
+
+            # Fit height so there's no internal scroll bar
+            # ~35px per row + header padding is a good Streamlit rule of thumb
+            row_h = 35
+            height = min(900, (len(df_teams_today) + 1) * row_h + 10)
+
+            st.dataframe(
+                df_teams_today,
+                use_container_width=True,
+                hide_index=True,
+                height=height,
+            )
 
     st.markdown("---")
     st.markdown("### 2) Enter game results (scores + referee inputs)")
