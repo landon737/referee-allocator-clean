@@ -161,7 +161,7 @@ def ensure_referees_phone_column():
 def ensure_ladder_tables():
     """
     Safe migrations for ladder system:
-    - teams: team name + division
+    - teams: team name + division + opening_balance
     - game_results: one row per game with admin-entered scoring inputs
     """
     conn = db()
@@ -173,10 +173,17 @@ def ensure_ladder_tables():
             CREATE TABLE IF NOT EXISTS teams (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
-                division TEXT NOT NULL
+                division TEXT NOT NULL,
+                opening_balance INTEGER NOT NULL DEFAULT 0
             );
             """
         )
+
+        # If teams table already existed without opening_balance, add it safely
+        cols = conn.execute("PRAGMA table_info(teams);").fetchall()
+        col_names = {c["name"] for c in cols}
+        if "opening_balance" not in col_names:
+            conn.execute("ALTER TABLE teams ADD COLUMN opening_balance INTEGER NOT NULL DEFAULT 0;")
 
         cur.execute(
             """
@@ -206,6 +213,7 @@ def ensure_ladder_tables():
         conn.commit()
     finally:
         conn.close()
+
 
 
 def init_db():
@@ -934,7 +942,74 @@ LADDER_WIN_PTS = 3
 LADDER_DRAW_PTS = 2
 LADDER_LOSS_PTS = 0
 
-def upsert_team(name: str, division: str):
+DIVISIONS = [
+    "Division 1",
+    "Division 2",
+    "Division 3",
+    "Golden Oldies",
+    "Other",
+]
+
+
+def ensure_ladder_tables():
+    """
+    Safe migrations for ladder system:
+    - teams: team name + division + opening_balance
+    - game_results: one row per game with admin-entered scoring inputs
+    """
+    conn = db()
+    try:
+        cur = conn.cursor()
+
+        # New installs: include opening_balance in CREATE TABLE
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS teams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                division TEXT NOT NULL,
+                opening_balance INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+
+        # Existing DBs: add column if missing
+        cols = conn.execute("PRAGMA table_info(teams);").fetchall()
+        col_names = {c["name"] for c in cols}
+        if "opening_balance" not in col_names:
+            conn.execute("ALTER TABLE teams ADD COLUMN opening_balance INTEGER NOT NULL DEFAULT 0;")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS game_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id INTEGER NOT NULL UNIQUE,
+
+                home_score INTEGER NOT NULL DEFAULT 0,
+                away_score INTEGER NOT NULL DEFAULT 0,
+
+                home_female_tries INTEGER NOT NULL DEFAULT 0,
+                away_female_tries INTEGER NOT NULL DEFAULT 0,
+
+                home_conduct INTEGER NOT NULL DEFAULT 0,   -- 0..10
+                away_conduct INTEGER NOT NULL DEFAULT 0,   -- 0..10
+
+                home_unstripped INTEGER NOT NULL DEFAULT 0,
+                away_unstripped INTEGER NOT NULL DEFAULT 0,
+
+                updated_at TEXT NOT NULL,
+
+                FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
+            );
+            """
+        )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def upsert_team(name: str, division: str, opening_balance: int = 0):
     name = (name or "").strip()
     division = (division or "").strip()
     if not name or not division:
@@ -944,22 +1019,31 @@ def upsert_team(name: str, division: str):
     try:
         conn.execute(
             """
-            INSERT INTO teams(name, division)
-            VALUES (?, ?)
-            ON CONFLICT(name) DO UPDATE SET division=excluded.division
+            INSERT INTO teams(name, division, opening_balance)
+            VALUES (?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                division=excluded.division,
+                opening_balance=excluded.opening_balance
             """,
-            (name, division),
+            (name, division, int(opening_balance or 0)),
         )
         conn.commit()
     finally:
         conn.close()
 
-    
 
 def list_teams() -> list[sqlite3.Row]:
     conn = db()
     rows = conn.execute(
-        "SELECT id, name, division FROM teams ORDER BY division ASC, name ASC"
+        """
+        SELECT
+            id,
+            name,
+            division,
+            COALESCE(opening_balance,0) AS opening_balance
+        FROM teams
+        ORDER BY division ASC, name ASC
+        """
     ).fetchall()
     conn.close()
     return rows
@@ -1069,6 +1153,9 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 COALESCE(t1.division,'') AS home_division,
                 COALESCE(t2.division,'') AS away_division,
 
+                COALESCE(t1.opening_balance,0) AS home_opening,
+                COALESCE(t2.opening_balance,0) AS away_opening,
+
                 gr.home_score, gr.away_score,
                 gr.home_female_tries, gr.away_female_tries,
                 gr.home_conduct, gr.away_conduct,
@@ -1086,6 +1173,7 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 home_team AS team,
                 away_team AS opponent,
                 home_division AS division,
+                home_opening AS opening_balance,
 
                 home_score AS pf,
                 away_score AS pa,
@@ -1104,6 +1192,7 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 away_team AS team,
                 home_team AS opponent,
                 away_division AS division,
+                away_opening AS opening_balance,
 
                 away_score AS pf,
                 home_score AS pa,
@@ -1122,6 +1211,7 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
             division,
             team,
             opponent,
+            opening_balance,
             pf,
             pa,
             (pf - pa) AS margin,
@@ -1175,6 +1265,7 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 "Division": (r["division"] or "").strip() or "—",
                 "Team": r["team"] or "—",
                 "Opponent": r["opponent"] or "—",
+                "Opening": int(r["opening_balance"] or 0),
                 "PF": int(r["pf"] or 0),
                 "PA": int(r["pa"] or 0),
                 "Res": r["result"] or "—",
@@ -1185,7 +1276,7 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 "Conduct": conduct,
                 "Unstrip": int(r["unstripped"] or 0),
                 "Pen": pen,
-                "Total": total,
+                "Points": total,
                 "Updated": (r["updated_at"] or "")[:19],
             }
         )
@@ -1195,19 +1286,17 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
 
 def ladder_table_df_for_date(selected_date: date, division: str) -> pd.DataFrame:
     """
-    Aggregated ladder for the selected date only.
-    If you want season-to-date later, we can switch from date window to a wider range.
+    Aggregated ladder for the selected date only (plus Opening Balance).
     """
     df = ladder_audit_df_for_date(selected_date)
     if df.empty:
         return pd.DataFrame()
 
-    df = df[df["Division"].fillna("—") == (division or "—")]
-
+    div_label = (division or "—").strip() or "—"
+    df = df[df["Division"].fillna("—") == div_label]
     if df.empty:
         return pd.DataFrame()
 
-    # Aggregate
     grouped = df.groupby("Team", dropna=False).agg(
         P=("Team", "count"),
         W=("Res", lambda s: int((s == "W").sum())),
@@ -1215,25 +1304,25 @@ def ladder_table_df_for_date(selected_date: date, division: str) -> pd.DataFrame
         L=("Res", lambda s: int((s == "L").sum())),
         PF=("PF", "sum"),
         PA=("PA", "sum"),
+        Opening=("Opening", "max"),  # should be constant per team; max is safe
         Match=("Match", "sum"),
         CloseBP=("CloseBP", "sum"),
         FemBP=("FemBP", "sum"),
         Conduct=("Conduct", "sum"),
         Pen=("Pen", "sum"),
-        Total=("Total", "sum"),
+        Points=("Points", "sum"),
     ).reset_index()
 
     grouped["PD"] = grouped["PF"] - grouped["PA"]
+    grouped["Total"] = grouped["Opening"] + grouped["Points"]
 
-    # Sort: Total desc, PD desc, PF desc, Team asc
     grouped = grouped.sort_values(
         by=["Total", "PD", "PF", "Team"],
         ascending=[False, False, False, True],
     ).reset_index(drop=True)
 
-    # Reorder columns nicely
     grouped = grouped[
-        ["Team", "P", "W", "D", "L", "PF", "PA", "PD", "Match", "CloseBP", "FemBP", "Conduct", "Pen", "Total"]
+        ["Team", "P", "W", "D", "L", "PF", "PA", "PD", "Opening", "Match", "CloseBP", "FemBP", "Conduct", "Pen", "Points", "Total"]
     ]
     return grouped
 
@@ -1249,9 +1338,9 @@ def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
     if not todays:
         return warnings
 
-    # Team division coverage
+    # Team division coverage + opening balance awareness
     missing_div = set()
-    mismatch_div_games = []
+    cross_div_games = []
 
     for g in todays:
         h = (g["home_team"] or "").strip()
@@ -1264,13 +1353,13 @@ def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
         if not da:
             missing_div.add(a)
         if dh and da and dh != da:
-            mismatch_div_games.append(f"{h} vs {a} ({dh} / {da})")
+            cross_div_games.append(f"{h} vs {a} ({dh} / {da})")
 
     if missing_div:
         warnings.append("Missing team division for: " + ", ".join(sorted(missing_div)))
 
-    if mismatch_div_games:
-        warnings.append("Cross-division games detected: " + "; ".join(mismatch_div_games))
+    if cross_div_games:
+        warnings.append("Cross-division games detected: " + "; ".join(cross_div_games))
 
     # Results completeness + sanity checks
     for g in todays:
@@ -1299,120 +1388,6 @@ def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
                 warnings.append(f"Negative value {k} for game: {g['home_team']} vs {g['away_team']}")
 
     return warnings
-
-
-def get_assignments_for_game(game_id: int):
-    conn = db()
-    rows = conn.execute(
-        """
-        SELECT
-            a.id,
-            a.slot_no,
-            a.referee_id,
-            a.status,
-            a.updated_at,
-            r.name AS ref_name,
-            r.email AS ref_email
-        FROM assignments a
-        LEFT JOIN referees r ON r.id = a.referee_id
-        WHERE a.game_id=?
-        ORDER BY a.slot_no ASC
-        """,
-        (game_id,),
-    ).fetchall()
-    conn.close()
-    return rows
-
-
-def get_assignment_live(assignment_id: int):
-    conn = db()
-    row = conn.execute(
-        """
-        SELECT
-            a.id,
-            a.game_id,
-            a.slot_no,
-            a.referee_id,
-            a.status,
-            a.updated_at,
-            r.name AS ref_name,
-            r.email AS ref_email
-        FROM assignments a
-        LEFT JOIN referees r ON r.id = a.referee_id
-        WHERE a.id=?
-        LIMIT 1
-        """,
-        (assignment_id,),
-    ).fetchone()
-    conn.close()
-    return row
-
-
-
-def game_local_date(game_row):
-    start = dtparser.parse(game_row["start_dt"])
-    return start.date()
-
-
-def referee_has_blackout(ref_id: int, d: date) -> bool:
-    conn = db()
-    row = conn.execute(
-        """
-        SELECT 1 FROM blackouts
-        WHERE referee_id=? AND blackout_date=?
-        LIMIT 1
-        """,
-        (ref_id, d.isoformat()),
-    ).fetchone()
-    conn.close()
-    return bool(row)
-
-
-def set_assignment_ref(assignment_id: int, ref_id: int | None):
-    conn = db()
-    conn.execute(
-        """
-        UPDATE assignments
-        SET referee_id=?,
-            status='EMPTY',
-            updated_at=?
-        WHERE id=?
-        """,
-        (ref_id, now_iso(), assignment_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def set_assignment_status(assignment_id: int, status: str):
-    conn = db()
-    conn.execute(
-        """
-        UPDATE assignments
-        SET status=?, updated_at=?
-        WHERE id=?
-        """,
-        (status, now_iso(), assignment_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def clear_assignment(assignment_id: int):
-    conn = db()
-    conn.execute(
-        """
-        UPDATE assignments
-        SET referee_id=NULL,
-            status='EMPTY',
-            updated_at=?
-        WHERE id=?
-        """,
-        (now_iso(), assignment_id),
-    )
-    conn.execute("DELETE FROM offers WHERE assignment_id=?", (assignment_id,))
-    conn.commit()
-    conn.close()
 
 
 # ============================================================
@@ -2580,7 +2555,7 @@ with tabs[0]:
 # ============================================================
 with tabs[1]:
     st.subheader("Competition Ladder (Admin)")
-    st.caption("Enter team divisions + game results, then view ladder + audit breakdown for fault finding.")
+    st.caption("Enter team divisions + opening balance + game results, then view ladder + audit breakdown for fault finding.")
 
     games = get_games()
     if not games:
@@ -2610,7 +2585,7 @@ with tabs[1]:
     st.caption(f"{len(todays_games)} game(s) on {selected_date.isoformat()}")
 
     st.markdown("---")
-    st.markdown("### 1) Team divisions")
+    st.markdown("### 1) Team divisions + opening balance")
 
     teams_today = sorted(
         {(g["home_team"] or "").strip() for g in todays_games}
@@ -2618,7 +2593,14 @@ with tabs[1]:
     )
     teams_today = [t for t in teams_today if t]
 
-    existing = {t["name"]: t["division"] for t in list_teams()}
+    teams_rows = list_teams()
+    existing = {
+        r["name"]: {
+            "division": (r["division"] or "").strip(),
+            "opening": int(r["opening_balance"] or 0),
+        }
+        for r in teams_rows
+    }
 
     if not teams_today:
         st.info("No teams found for this date.")
@@ -2627,36 +2609,47 @@ with tabs[1]:
     div_col1, div_col2 = st.columns([2, 1], gap="large")
 
     with div_col1:
-        st.write("Set division per team (saved immediately).")
-
-        DIVISIONS = [
-            "Division 1",
-            "Division 2",
-            "Division 3",
-            "Golden Oldies",
-            "Other",
-        ]
+        st.write("Set division + opening balance per team (saved immediately).")
 
         for t in teams_today:
-            current_div = (existing.get(t) or "").strip()
-            default_idx = DIVISIONS.index(current_div) if current_div in DIVISIONS else 0
+            cur_div = (existing.get(t, {}).get("division") or "").strip()
+            cur_open = int(existing.get(t, {}).get("opening") or 0)
 
-            new_div = st.selectbox(
-                label=t,
-                options=DIVISIONS,
-                index=default_idx,
-                key=f"div_select_{selected_date.isoformat()}_{t}",
-            )
+            default_idx = DIVISIONS.index(cur_div) if cur_div in DIVISIONS else 0
 
-            if new_div != current_div:
-                upsert_team(t, new_div)
-                existing[t] = new_div
+            r1, r2 = st.columns([2, 1], gap="medium")
+            with r1:
+                new_div = st.selectbox(
+                    label=t,
+                    options=DIVISIONS,
+                    index=default_idx,
+                    key=f"div_select_{selected_date.isoformat()}_{t}",
+                )
+            with r2:
+                new_open = st.number_input(
+                    label="Opening",
+                    min_value=0,
+                    step=1,
+                    value=cur_open,
+                    key=f"open_{selected_date.isoformat()}_{t}",
+                )
+
+            if new_div != cur_div or int(new_open) != cur_open:
+                upsert_team(t, new_div, int(new_open))
+                existing[t] = {"division": new_div, "opening": int(new_open)}
 
     with div_col2:
         st.write("Teams (today)")
         st.dataframe(
             pd.DataFrame(
-                [{"Team": t, "Division": (existing.get(t) or "").strip() or "—"} for t in teams_today]
+                [
+                    {
+                        "Team": t,
+                        "Division": (existing.get(t, {}).get("division") or "").strip() or "—",
+                        "Opening": int(existing.get(t, {}).get("opening") or 0),
+                    }
+                    for t in teams_today
+                ]
             ),
             use_container_width=True,
             hide_index=True,
@@ -2791,7 +2784,7 @@ with tabs[1]:
     if not divisions:
         divisions = ["—"]
 
-    div_choice = st.selectbox("Division", divisions, key="ladder_div_select")
+    div_choice = st.selectbox("Division (view)", divisions, key="ladder_div_select")
 
     df_ladder = ladder_table_df_for_date(selected_date, div_choice)
     if df_ladder.empty:
