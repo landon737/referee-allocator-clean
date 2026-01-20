@@ -943,6 +943,61 @@ def has_any_offers_for_window(start_date: date, end_date_exclusive: date) -> boo
     conn.close()
     return bool(row)
 
+def get_referee_workload_for_window(start_date: date, end_date_exclusive: date) -> pd.DataFrame:
+    """
+    Returns a dataframe of all active referees and how many slots they have that are
+    ACCEPTED/ASSIGNED for games whose start_dt is within [start_date, end_date_exclusive).
+    Sorted least -> most.
+    """
+    start_min = datetime.combine(start_date, datetime.min.time()).isoformat(timespec="seconds")
+    start_max = datetime.combine(end_date_exclusive, datetime.min.time()).isoformat(timespec="seconds")
+
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT
+            r.id AS referee_id,
+            TRIM(r.name) AS name,
+            TRIM(r.email) AS email,
+            SUM(
+                CASE
+                    WHEN g.id IS NOT NULL
+                     AND UPPER(COALESCE(a.status,'')) IN ('ACCEPTED','ASSIGNED')
+                    THEN 1 ELSE 0
+                END
+            ) AS accepted_slots
+        FROM referees r
+        LEFT JOIN assignments a
+            ON a.referee_id = r.id
+        LEFT JOIN games g
+            ON g.id = a.game_id
+           AND g.start_dt >= ?
+           AND g.start_dt < ?
+        WHERE r.active = 1
+        GROUP BY r.id, r.name, r.email
+        ORDER BY accepted_slots ASC, name ASC
+        """,
+        (start_min, start_max),
+    ).fetchall()
+    conn.close()
+
+    df = pd.DataFrame(
+        [
+            {
+                "Referee": (row["name"] or "").strip() or "—",
+                "Email": (row["email"] or "").strip() or "—",
+                "Accepted": int(row["accepted_slots"] or 0),
+            }
+            for row in rows
+        ]
+    )
+
+    if df.empty:
+        df = pd.DataFrame(columns=["Referee", "Email", "Accepted"])
+
+    return df
+
+
 # ============================================================
 # Printable PDF helpers
 # ============================================================
@@ -1825,309 +1880,339 @@ with tabs[0]:
             default_idx = i
             break
 
-    selected_date = st.selectbox("Show games for date", all_dates, index=default_idx, key="games_date_select")
+    selected_date = st.selectbox(
+        "Show games for date",
+        all_dates,
+        index=default_idx,
+        key="games_date_select",
+    )
     count_games = sum(1 for g in games if game_local_date(g) == selected_date)
     st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
 
-    # Acceptance progress UI
+    # Use the SAME ISO week window you already use for acceptance progress
     week_start, week_end_excl = iso_week_window(selected_date)
-    accepted_slots, total_slots = get_acceptance_progress_for_window(week_start, week_end_excl)
 
-    pct = (accepted_slots / total_slots) if total_slots else 0.0
-    pct_clamped = max(0.0, min(1.0, pct))
+    # Two-column layout: main content (left) + workload panel (right)
+    main_col, side_col = st.columns([3, 1], gap="large")
 
-    if total_slots == 0:
-        bar_color = "#9e9e9e"
-    elif pct_clamped < 0.50:
-        bar_color = "#c62828"
-    elif pct_clamped < 0.90:
-        bar_color = "#ffb300"
-    else:
-        bar_color = "#2e7d32"
+    # ----------------------------
+    # RIGHT-HAND WORKLOAD PANEL
+    # ----------------------------
+    with side_col:
+        st.markdown("### Referee workload")
+        st.caption(f"ISO week: {week_start.isoformat()} → {(week_end_excl - timedelta(days=1)).isoformat()}")
 
-    not_accepted_names = list_referees_not_accepted_for_window(week_start, week_end_excl)
+        df_work = get_referee_workload_for_window(week_start, week_end_excl)
 
-    c_bar, c_list = st.columns([1, 2], vertical_alignment="center")
-
-    with c_bar:
-        height_px = 24
-        st.markdown(
-            f"""
-            <div style="font-size:12px; color:#666; margin-bottom:6px;">
-              <b>Week acceptance (ISO)</b> — {accepted_slots}/{total_slots}
-            </div>
-
-            <div style="width:100%; background:#e0e0e0; border-radius:{height_px}px; height:{height_px}px; overflow:hidden;">
-              <div style="width:{pct_clamped*100:.1f}%; background:{bar_color}; height:{height_px}px;"></div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c_list:
-        # Only show this panel when at least one OFFER exists in the week window
-        has_offers = has_any_offers_for_window(week_start, week_end_excl)
-
-        if not has_offers:
-            # Nothing shown (prevents misleading "All accepted" when nothing offered yet)
-            st.caption("")
-
+        if df_work.empty:
+            st.info("No referees found.")
         else:
+            st.dataframe(
+                df_work,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            total_acc = int(df_work["Accepted"].sum()) if "Accepted" in df_work.columns else 0
+            st.caption(f"Total accepted/assigned slots this week: {total_acc}")
+
+    # ----------------------------
+    # MAIN (LEFT) CONTENT
+    # ----------------------------
+    with main_col:
+        # Acceptance progress UI (existing)
+        accepted_slots, total_slots = get_acceptance_progress_for_window(week_start, week_end_excl)
+
+        pct = (accepted_slots / total_slots) if total_slots else 0.0
+        pct_clamped = max(0.0, min(1.0, pct))
+
+        if total_slots == 0:
+            bar_color = "#9e9e9e"
+        elif pct_clamped < 0.50:
+            bar_color = "#c62828"
+        elif pct_clamped < 0.90:
+            bar_color = "#ffb300"
+        else:
+            bar_color = "#2e7d32"
+
+        not_accepted_names = list_referees_not_accepted_for_window(week_start, week_end_excl)
+
+        c_bar, c_list = st.columns([1, 2], vertical_alignment="center")
+
+        with c_bar:
+            height_px = 24
             st.markdown(
-                "<div style='font-size:12px; color:#666; margin-bottom:6px;'><b>Yet to ACCEPT (unique)</b></div>",
+                f"""
+                <div style="font-size:12px; color:#666; margin-bottom:6px;">
+                  <b>Week acceptance (ISO)</b> — {accepted_slots}/{total_slots}
+                </div>
+
+                <div style="width:100%; background:#e0e0e0; border-radius:{height_px}px; height:{height_px}px; overflow:hidden;">
+                  <div style="width:{pct_clamped*100:.1f}%; background:{bar_color}; height:{height_px}px;"></div>
+                </div>
+                """,
                 unsafe_allow_html=True,
             )
 
-            if not not_accepted_names:
-                st.markdown(
-                    "<div style='font-size:12px; color:#2e7d32;'>All accepted ✅</div>",
-                    unsafe_allow_html=True,
-                )
+        with c_list:
+            has_offers = has_any_offers_for_window(week_start, week_end_excl)
+
+            if not has_offers:
+                st.caption("")
             else:
-                # Horizontal list that wraps to right margin
-                items_html = ", ".join([f"<span>{n}</span>" for n in not_accepted_names])
                 st.markdown(
-                    f"""
-                    <div style="
-                        font-size:12px;
-                        color:#ffb300;
-                        line-height:1.6;
-                        display:flex;
-                        flex-wrap:wrap;
-                        gap:6px;
-                        align-items:center;
-                    ">
-                      {items_html}
-                    </div>
-                    """,
+                    "<div style='font-size:12px; color:#666; margin-bottom:6px;'><b>Yet to ACCEPT (unique)</b></div>",
                     unsafe_allow_html=True,
                 )
 
-
-    # Printable PDFs
-    st.markdown("---")
-    st.subheader("Printable Summary")
-
-    c_pdf1, c_pdf2, c_pdf3, c_pdf4 = st.columns([1, 2, 1, 2])
-
-    with c_pdf1:
-        if st.button("Build Summary PDF", key="build_pdf_btn"):
-            try:
-                pdf_bytes = build_admin_summary_pdf_bytes(selected_date)
-                st.session_state["admin_summary_pdf_bytes"] = pdf_bytes
-                st.success("Summary PDF built.")
-            except Exception as e:
-                st.error(f"Failed to build Summary PDF: {e}")
-
-    with c_pdf2:
-        pdf_bytes = st.session_state.get("admin_summary_pdf_bytes")
-        if pdf_bytes:
-            filename = f"game_summary_{selected_date.isoformat()}.pdf"
-            st.download_button(
-                label="Download Summary PDF",
-                data=pdf_bytes,
-                file_name=filename,
-                mime="application/pdf",
-                key="download_pdf_btn",
-            )
-        else:
-            st.caption("Click **Build Summary PDF** to generate the printable schedule.")
-
-    with c_pdf3:
-        if st.button("Build Referee Scorecards", key="build_scorecards_btn"):
-            try:
-                pdf_bytes = build_referee_scorecards_pdf_bytes(selected_date)
-                st.session_state["ref_scorecards_pdf_bytes"] = pdf_bytes
-                st.success("Scorecards PDF built.")
-            except Exception as e:
-                st.error(f"Failed to build Scorecards PDF: {e}")
-
-    with c_pdf4:
-        pdf_bytes = st.session_state.get("ref_scorecards_pdf_bytes")
-        if pdf_bytes:
-            filename = f"referee_scorecards_{selected_date.isoformat()}.pdf"
-            st.download_button(
-                label="Download Scorecards PDF",
-                data=pdf_bytes,
-                file_name=filename,
-                mime="application/pdf",
-                key="download_scorecards_btn",
-            )
-        else:
-            st.caption("Click **Build Referee Scorecards** to generate the 6-up scorecards.")
-
-    # Games list + assignments UI
-    for g in games:
-        if game_local_date(g) != selected_date:
-            continue
-
-        start_dt = dtparser.parse(g["start_dt"])
-        gdate = game_local_date(g)
-
-        ref_options = ["— Select referee —"]
-        ref_lookup = {}
-        for r in refs:
-            label = f"{r['name']} ({r['email']})"
-            if referee_has_blackout(r["id"], gdate):
-                label = f"🚫 {label} — blackout"
-            ref_options.append(label)
-            ref_lookup[label] = r["id"]
-
-        with st.container(border=True):
-            st.markdown(
-                f"**{g['home_team']} vs {g['away_team']}**  \n"
-                f"Field: **{g['field_name']}**  \n"
-                f"Start: **{start_dt.strftime('%Y-%m-%d %I:%M %p').lstrip('0')}**"
-            )
-
-            assigns = get_assignments_for_game(g["id"])
-            cols = st.columns(2)
-
-            for col_idx, a in enumerate(assigns):
-                with cols[col_idx]:
-                    st.markdown(f"#### Slot {a['slot_no']}")
-
-                    status = (a["status"] or "").strip().upper()
-                    st.caption(f"assignment_id={a['id']} | status={status} | updated_at={a['updated_at']}")
-
-                    current_ref_label = None
-                    if a["referee_id"] is not None and a["ref_name"] and a["ref_email"]:
-                        current_ref_label = f"{a['ref_name']} ({a['ref_email']})"
-                        if referee_has_blackout(a["referee_id"], gdate):
-                            current_ref_label = f"🚫 {current_ref_label} — blackout"
-
-                    default_index = 0
-                    if current_ref_label and current_ref_label in ref_options:
-                        default_index = ref_options.index(current_ref_label)
-
-                    refpick_key = f"refpick_{g['id']}_{a['slot_no']}"
-                    pick = st.selectbox(
-                        "Referee",
-                        ref_options,
-                        index=default_index,
-                        key=refpick_key,
-                        disabled=(status in ("ACCEPTED", "ASSIGNED")),
+                if not not_accepted_names:
+                    st.markdown(
+                        "<div style='font-size:12px; color:#2e7d32;'>All accepted ✅</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    items_html = ", ".join([f"<span>{n}</span>" for n in not_accepted_names])
+                    st.markdown(
+                        f"""
+                        <div style="
+                            font-size:12px;
+                            color:#ffb300;
+                            line-height:1.6;
+                            display:flex;
+                            flex-wrap:wrap;
+                            gap:6px;
+                            align-items:center;
+                        ">
+                          {items_html}
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
                     )
 
-                    if pick != "— Select referee —":
-                        chosen_ref_id = ref_lookup[pick]
-                        if status in ("ACCEPTED", "ASSIGNED"):
-                            st.info("This slot is locked (ACCEPTED/ASSIGNED). Use Action → RESET to change it.")
+        # Printable PDFs (existing)
+        st.markdown("---")
+        st.subheader("Printable Summary")
+
+        c_pdf1, c_pdf2, c_pdf3, c_pdf4 = st.columns([1, 2, 1, 2])
+
+        with c_pdf1:
+            if st.button("Build Summary PDF", key="build_pdf_btn"):
+                try:
+                    pdf_bytes = build_admin_summary_pdf_bytes(selected_date)
+                    st.session_state["admin_summary_pdf_bytes"] = pdf_bytes
+                    st.success("Summary PDF built.")
+                except Exception as e:
+                    st.error(f"Failed to build Summary PDF: {e}")
+
+        with c_pdf2:
+            pdf_bytes = st.session_state.get("admin_summary_pdf_bytes")
+            if pdf_bytes:
+                filename = f"game_summary_{selected_date.isoformat()}.pdf"
+                st.download_button(
+                    label="Download Summary PDF",
+                    data=pdf_bytes,
+                    file_name=filename,
+                    mime="application/pdf",
+                    key="download_pdf_btn",
+                )
+            else:
+                st.caption("Click **Build Summary PDF** to generate the printable schedule.")
+
+        with c_pdf3:
+            if st.button("Build Referee Scorecards", key="build_scorecards_btn"):
+                try:
+                    pdf_bytes = build_referee_scorecards_pdf_bytes(selected_date)
+                    st.session_state["ref_scorecards_pdf_bytes"] = pdf_bytes
+                    st.success("Scorecards PDF built.")
+                except Exception as e:
+                    st.error(f"Failed to build Scorecards PDF: {e}")
+
+        with c_pdf4:
+            pdf_bytes = st.session_state.get("ref_scorecards_pdf_bytes")
+            if pdf_bytes:
+                filename = f"referee_scorecards_{selected_date.isoformat()}.pdf"
+                st.download_button(
+                    label="Download Scorecards PDF",
+                    data=pdf_bytes,
+                    file_name=filename,
+                    mime="application/pdf",
+                    key="download_scorecards_btn",
+                )
+            else:
+                st.caption("Click **Build Referee Scorecards** to generate the 6-up scorecards.")
+
+        # Games list + assignments UI (existing)
+        for g in games:
+            if game_local_date(g) != selected_date:
+                continue
+
+            start_dt = dtparser.parse(g["start_dt"])
+            gdate = game_local_date(g)
+
+            ref_options = ["— Select referee —"]
+            ref_lookup = {}
+            for r in refs:
+                label = f"{r['name']} ({r['email']})"
+                if referee_has_blackout(r["id"], gdate):
+                    label = f"🚫 {label} — blackout"
+                ref_options.append(label)
+                ref_lookup[label] = r["id"]
+
+            with st.container(border=True):
+                st.markdown(
+                    f"**{g['home_team']} vs {g['away_team']}**  \n"
+                    f"Field: **{g['field_name']}**  \n"
+                    f"Start: **{start_dt.strftime('%Y-%m-%d %I:%M %p').lstrip('0')}**"
+                )
+
+                assigns = get_assignments_for_game(g["id"])
+                cols = st.columns(2)
+
+                for col_idx, a in enumerate(assigns):
+                    with cols[col_idx]:
+                        st.markdown(f"#### Slot {a['slot_no']}")
+
+                        status = (a["status"] or "").strip().upper()
+                        st.caption(f"assignment_id={a['id']} | status={status} | updated_at={a['updated_at']}")
+
+                        current_ref_label = None
+                        if a["referee_id"] is not None and a["ref_name"] and a["ref_email"]:
+                            current_ref_label = f"{a['ref_name']} ({a['ref_email']})"
+                            if referee_has_blackout(a["referee_id"], gdate):
+                                current_ref_label = f"🚫 {current_ref_label} — blackout"
+
+                        default_index = 0
+                        if current_ref_label and current_ref_label in ref_options:
+                            default_index = ref_options.index(current_ref_label)
+
+                        refpick_key = f"refpick_{g['id']}_{a['slot_no']}"
+                        pick = st.selectbox(
+                            "Referee",
+                            ref_options,
+                            index=default_index,
+                            key=refpick_key,
+                            disabled=(status in ("ACCEPTED", "ASSIGNED")),
+                        )
+
+                        if pick != "— Select referee —":
+                            chosen_ref_id = ref_lookup[pick]
+                            if status in ("ACCEPTED", "ASSIGNED"):
+                                st.info("This slot is locked (ACCEPTED/ASSIGNED). Use Action → RESET to change it.")
+                            else:
+                                if a["referee_id"] != chosen_ref_id:
+                                    set_assignment_ref(a["id"], chosen_ref_id)
+                                    st.rerun()
                         else:
-                            if a["referee_id"] != chosen_ref_id:
-                                set_assignment_ref(a["id"], chosen_ref_id)
+                            if a["referee_id"] is not None:
+                                clear_assignment(a["id"])
+                                st.session_state[refpick_key] = "— Select referee —"
                                 st.rerun()
-                    else:
+
+                        blackout = False
                         if a["referee_id"] is not None:
-                            clear_assignment(a["id"])
-                            st.session_state[refpick_key] = "— Select referee —"
-                            st.rerun()
+                            blackout = referee_has_blackout(a["referee_id"], gdate)
 
-                    blackout = False
-                    if a["referee_id"] is not None:
-                        blackout = referee_has_blackout(a["referee_id"], gdate)
+                        if status == "ACCEPTED":
+                            status_badge(f"✅ {a['ref_name']} — ACCEPTED", bg="#2e7d32")
+                        elif status == "ASSIGNED":
+                            status_badge(f"✅ {a['ref_name']} — ASSIGNED", bg="#2e7d32")
+                        elif status == "DECLINED":
+                            status_badge(f"❌ {a['ref_name']} — DECLINED", bg="#c62828")
+                        elif status == "OFFERED":
+                            status_badge(f"⬜ {a['ref_name']} — OFFERED", bg="#546e7a")
+                        elif a["referee_id"] is not None:
+                            status_badge(f"⬛ {a['ref_name']} — NOT OFFERED YET", bg="#424242")
+                        else:
+                            st.caption("EMPTY")
 
-                    if status == "ACCEPTED":
-                        status_badge(f"✅ {a['ref_name']} — ACCEPTED", bg="#2e7d32")
-                    elif status == "ASSIGNED":
-                        status_badge(f"✅ {a['ref_name']} — ASSIGNED", bg="#2e7d32")
-                    elif status == "DECLINED":
-                        status_badge(f"❌ {a['ref_name']} — DECLINED", bg="#c62828")
-                    elif status == "OFFERED":
-                        status_badge(f"⬜ {a['ref_name']} — OFFERED", bg="#546e7a")
-                    elif a["referee_id"] is not None:
-                        status_badge(f"⬛ {a['ref_name']} — NOT OFFERED YET", bg="#424242")
-                    else:
-                        st.caption("EMPTY")
+                        if blackout:
+                            st.warning(f"Blackout date conflict: {gdate.isoformat()}")
 
-                    if blackout:
-                        st.warning(f"Blackout date conflict: {gdate.isoformat()}")
+                        action_key = f"action_{a['id']}"
+                        msg_key = f"msg_{a['id']}"
+                        st.session_state.setdefault(action_key, "—")
 
-                    action_key = f"action_{a['id']}"
-                    msg_key = f"msg_{a['id']}"
-                    st.session_state.setdefault(action_key, "—")
+                        action_options = ["—", "OFFER", "ASSIGN", "DELETE", "RESET"]
+                        if status in ("ACCEPTED", "ASSIGNED"):
+                            action_options = ["—", "RESET", "DELETE"]
 
-                    action_options = ["—", "OFFER", "ASSIGN", "DELETE", "RESET"]
-                    if status in ("ACCEPTED", "ASSIGNED"):
-                        action_options = ["—", "RESET", "DELETE"]
+                        def on_action_change(
+                            assignment_id=a["id"],
+                            game_row=g,
+                            start_dt=start_dt,
+                            gdate=gdate,
+                            action_key=action_key,
+                            msg_key=msg_key,
+                            refpick_key=refpick_key,
+                        ):
+                            choice = st.session_state.get(action_key, "—")
+                            st.session_state.pop(msg_key, None)
 
-                    def on_action_change(
-                        assignment_id=a["id"],
-                        game_row=g,
-                        start_dt=start_dt,
-                        gdate=gdate,
-                        action_key=action_key,
-                        msg_key=msg_key,
-                        refpick_key=refpick_key,
-                    ):
-                        choice = st.session_state.get(action_key, "—")
-                        st.session_state.pop(msg_key, None)
+                            if choice == "—":
+                                return
 
-                        if choice == "—":
-                            return
+                            live_a = get_assignment_live(assignment_id)
+                            if not live_a:
+                                st.session_state[msg_key] = "Could not load assignment."
+                                st.session_state[action_key] = "—"
+                                st.rerun()
+                                return
 
-                        live_a = get_assignment_live(assignment_id)
-                        if not live_a:
-                            st.session_state[msg_key] = "Could not load assignment."
-                            st.session_state[action_key] = "—"
-                            st.rerun()
-                            return
+                            live_ref_id = live_a["referee_id"]
+                            live_ref_name = live_a["ref_name"]
+                            live_ref_email = live_a["ref_email"]
+                            live_status = (live_a["status"] or "").strip().upper()
 
-                        live_ref_id = live_a["referee_id"]
-                        live_ref_name = live_a["ref_name"]
-                        live_ref_email = live_a["ref_email"]
-                        live_status = (live_a["status"] or "").strip().upper()
+                            live_blackout = False
+                            if live_ref_id is not None:
+                                live_blackout = referee_has_blackout(int(live_ref_id), gdate)
 
-                        live_blackout = False
-                        if live_ref_id is not None:
-                            live_blackout = referee_has_blackout(int(live_ref_id), gdate)
-
-                        if live_ref_id is None and choice in ("OFFER", "ASSIGN"):
-                            st.session_state[msg_key] = "Select a referee first."
-                            st.session_state[action_key] = "—"
-                            return
-
-                        if choice == "OFFER" and live_status in ("ACCEPTED", "ASSIGNED"):
-                            st.session_state[msg_key] = "This slot is already confirmed (ACCEPTED/ASSIGNED)."
-                            st.session_state[action_key] = "—"
-                            return
-
-                        if choice == "OFFER":
-                            if live_blackout:
-                                st.session_state[msg_key] = (
-                                    "Offer blocked: referee is unavailable on this date (blackout). "
-                                    "You can still ASSIGN manually if needed."
-                                )
+                            if live_ref_id is None and choice in ("OFFER", "ASSIGN"):
+                                st.session_state[msg_key] = "Select a referee first."
                                 st.session_state[action_key] = "—"
                                 return
 
-                            send_offer_email_and_mark_offered(
-                                assignment_id=assignment_id,
-                                referee_name=live_ref_name,
-                                referee_email=live_ref_email,
-                                game=game_row,
-                                start_dt=start_dt,
-                                msg_key=msg_key,
-                            )
+                            if choice == "OFFER" and live_status in ("ACCEPTED", "ASSIGNED"):
+                                st.session_state[msg_key] = "This slot is already confirmed (ACCEPTED/ASSIGNED)."
+                                st.session_state[action_key] = "—"
+                                return
 
-                        elif choice == "ASSIGN":
-                            set_assignment_status(assignment_id, "ASSIGNED")
-                            st.session_state[msg_key] = "Assigned."
+                            if choice == "OFFER":
+                                if live_blackout:
+                                    st.session_state[msg_key] = (
+                                        "Offer blocked: referee is unavailable on this date (blackout). "
+                                        "You can still ASSIGN manually if needed."
+                                    )
+                                    st.session_state[action_key] = "—"
+                                    return
 
-                        elif choice in ("DELETE", "RESET"):
-                            clear_assignment(assignment_id)
-                            st.session_state[refpick_key] = "— Select referee —"
-                            st.session_state[msg_key] = "Slot cleared (EMPTY)."
+                                send_offer_email_and_mark_offered(
+                                    assignment_id=assignment_id,
+                                    referee_name=live_ref_name,
+                                    referee_email=live_ref_email,
+                                    game=game_row,
+                                    start_dt=start_dt,
+                                    msg_key=msg_key,
+                                )
 
-                        st.session_state[action_key] = "—"
-                        st.rerun()
+                            elif choice == "ASSIGN":
+                                set_assignment_status(assignment_id, "ASSIGNED")
+                                st.session_state[msg_key] = "Assigned."
 
-                    st.selectbox(
-                        "Action",
-                        action_options,
-                        key=action_key,
-                        on_change=on_action_change,
-                    )
+                            elif choice in ("DELETE", "RESET"):
+                                clear_assignment(assignment_id)
+                                st.session_state[refpick_key] = "— Select referee —"
+                                st.session_state[msg_key] = "Slot cleared (EMPTY)."
 
-                    if st.session_state.get(msg_key):
-                        st.info(st.session_state[msg_key])
+                            st.session_state[action_key] = "—"
+                            st.rerun()
+
+                        st.selectbox(
+                            "Action",
+                            action_options,
+                            key=action_key,
+                            on_change=on_action_change,
+                        )
+
+                        if st.session_state.get(msg_key):
+                            st.info(st.session_state[msg_key])
