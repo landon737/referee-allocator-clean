@@ -994,6 +994,88 @@ def get_assignment_live(assignment_id: int):
     conn.close()
     return row
 
+# ============================================================
+# Assignment helpers
+# ============================================================
+
+def set_assignment_status(assignment_id: int, status: str):
+    status = (status or "EMPTY").strip().upper()
+    conn = db()
+    conn.execute(
+        """
+        UPDATE assignments
+        SET status=?, updated_at=?
+        WHERE id=?
+        """,
+        (status, now_iso(), int(assignment_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_assignment_ref(assignment_id: int, referee_id: int):
+    """
+    Set the referee for a slot.
+    If a referee is set and the slot was EMPTY, we move it to NOT_OFFERED
+    (your UI treats any non-empty referee as 'NOT OFFERED YET' unless OFFERED/DECLINED/ACCEPTED/ASSIGNED).
+    """
+    conn = db()
+
+    # Keep status consistent with your UI badges
+    cur = conn.execute(
+        "SELECT referee_id, status FROM assignments WHERE id=? LIMIT 1",
+        (int(assignment_id),),
+    ).fetchone()
+
+    if not cur:
+        conn.close()
+        return
+
+    cur_status = (cur["status"] or "EMPTY").strip().upper()
+    new_status = cur_status
+
+    if cur_status == "EMPTY":
+        new_status = "NOT_OFFERED"
+
+    conn.execute(
+        """
+        UPDATE assignments
+        SET referee_id=?, status=?, updated_at=?
+        WHERE id=?
+        """,
+        (int(referee_id), new_status, now_iso(), int(assignment_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _delete_offers_for_assignment(conn: sqlite3.Connection, assignment_id: int):
+    """
+    Internal helper: ensure no stale offer links remain for this assignment.
+    """
+    conn.execute("DELETE FROM offers WHERE assignment_id=?", (int(assignment_id),))
+
+
+def clear_assignment(assignment_id: int):
+    """
+    Clears the slot back to EMPTY and removes any offers for that assignment.
+    This is what your RESET/DELETE action needs.
+    """
+    conn = db()
+    try:
+        _delete_offers_for_assignment(conn, assignment_id)
+        conn.execute(
+            """
+            UPDATE assignments
+            SET referee_id=NULL, status='EMPTY', updated_at=?
+            WHERE id=?
+            """,
+            (now_iso(), int(assignment_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
         
 # ============================================================
 # Ladder / scoring helpers
