@@ -1298,7 +1298,7 @@ def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
 
     return warnings
 
-        """
+    """
         SELECT
             a.id,
             a.slot_no,
