@@ -130,6 +130,15 @@ def _time_12h(dt: datetime) -> str:
     return dt.strftime("%I:%M %p").lstrip("0")
 
 
+def game_local_date(game_row) -> date:
+    """
+    Returns the local calendar date for a game row.
+    Expects game_row to have 'start_dt' (ISO string).
+    """
+    dt = dtparser.parse(game_row["start_dt"])
+    return dt.date()
+
+
 # ============================================================
 # DB
 # ============================================================
