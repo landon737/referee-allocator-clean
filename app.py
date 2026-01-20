@@ -158,9 +158,59 @@ def ensure_referees_phone_column():
     finally:
         conn.close()
 
+def ensure_ladder_tables():
+    """
+    Safe migrations for ladder system:
+    - teams: team name + division
+    - game_results: one row per game with admin-entered scoring inputs
+    """
+    conn = db()
+    try:
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS teams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                division TEXT NOT NULL
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS game_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id INTEGER NOT NULL UNIQUE,
+
+                home_score INTEGER NOT NULL DEFAULT 0,
+                away_score INTEGER NOT NULL DEFAULT 0,
+
+                home_female_tries INTEGER NOT NULL DEFAULT 0,
+                away_female_tries INTEGER NOT NULL DEFAULT 0,
+
+                home_conduct INTEGER NOT NULL DEFAULT 0,   -- 0..10
+                away_conduct INTEGER NOT NULL DEFAULT 0,   -- 0..10
+
+                home_unstripped INTEGER NOT NULL DEFAULT 0,
+                away_unstripped INTEGER NOT NULL DEFAULT 0,
+
+                updated_at TEXT NOT NULL,
+
+                FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
+            );
+            """
+        )
+
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def init_db():
     ensure_referees_phone_column()
+    ensure_ladder_tables()
     conn = db()
     cur = conn.cursor()
 
@@ -852,9 +902,381 @@ def get_referees():
     return rows
 
 
+
 def get_assignments_for_game(game_id: int):
     conn = db()
+    rows = conn.execute(# ============================================================
+# Ladder / scoring helpers
+# ============================================================
+
+LADDER_WIN_PTS = 3
+LADDER_DRAW_PTS = 2
+LADDER_LOSS_PTS = 0
+
+def upsert_team(name: str, division: str):
+    name = (name or "").strip()
+    division = (division or "").strip()
+    if not name or not division:
+        return
+
+    conn = db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO teams(name, division)
+            VALUES (?, ?)
+            ON CONFLICT(name) DO UPDATE SET division=excluded.division
+            """,
+            (name, division),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_teams() -> list[sqlite3.Row]:
+    conn = db()
     rows = conn.execute(
+        "SELECT id, name, division FROM teams ORDER BY division ASC, name ASC"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_team_division(name: str) -> str:
+    conn = db()
+    row = conn.execute(
+        "SELECT division FROM teams WHERE name=? LIMIT 1",
+        ((name or "").strip(),),
+    ).fetchone()
+    conn.close()
+    return (row["division"] if row else "").strip()
+
+
+def get_game_result(game_id: int) -> sqlite3.Row | None:
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT
+            game_id,
+            home_score, away_score,
+            home_female_tries, away_female_tries,
+            home_conduct, away_conduct,
+            home_unstripped, away_unstripped,
+            updated_at
+        FROM game_results
+        WHERE game_id=?
+        LIMIT 1
+        """,
+        (game_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def upsert_game_result(
+    *,
+    game_id: int,
+    home_score: int,
+    away_score: int,
+    home_female_tries: int,
+    away_female_tries: int,
+    home_conduct: int,
+    away_conduct: int,
+    home_unstripped: int,
+    away_unstripped: int,
+):
+    conn = db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO game_results(
+                game_id,
+                home_score, away_score,
+                home_female_tries, away_female_tries,
+                home_conduct, away_conduct,
+                home_unstripped, away_unstripped,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(game_id) DO UPDATE SET
+                home_score=excluded.home_score,
+                away_score=excluded.away_score,
+                home_female_tries=excluded.home_female_tries,
+                away_female_tries=excluded.away_female_tries,
+                home_conduct=excluded.home_conduct,
+                away_conduct=excluded.away_conduct,
+                home_unstripped=excluded.home_unstripped,
+                away_unstripped=excluded.away_unstripped,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(game_id),
+                int(home_score), int(away_score),
+                int(home_female_tries), int(away_female_tries),
+                int(home_conduct), int(away_conduct),
+                int(home_unstripped), int(away_unstripped),
+                now_iso(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
+    """
+    Returns per-team per-game computed scoring, plus inputs, for fault finding.
+    Only games on selected_date.
+    """
+    start_min = datetime.combine(selected_date, datetime.min.time()).isoformat(timespec="seconds")
+    start_max = datetime.combine(selected_date + timedelta(days=1), datetime.min.time()).isoformat(timespec="seconds")
+
+    conn = db()
+    rows = conn.execute(
+        """
+        WITH base AS (
+            SELECT
+                g.id AS game_id,
+                g.start_dt,
+                g.field_name,
+
+                g.home_team AS home_team,
+                g.away_team AS away_team,
+
+                COALESCE(t1.division,'') AS home_division,
+                COALESCE(t2.division,'') AS away_division,
+
+                gr.home_score, gr.away_score,
+                gr.home_female_tries, gr.away_female_tries,
+                gr.home_conduct, gr.away_conduct,
+                gr.home_unstripped, gr.away_unstripped,
+                gr.updated_at
+            FROM games g
+            LEFT JOIN teams t1 ON t1.name = g.home_team
+            LEFT JOIN teams t2 ON t2.name = g.away_team
+            LEFT JOIN game_results gr ON gr.game_id = g.id
+            WHERE g.start_dt >= ? AND g.start_dt < ?
+        ),
+        teamsplit AS (
+            SELECT
+                game_id, start_dt, field_name,
+                home_team AS team,
+                away_team AS opponent,
+                home_division AS division,
+
+                home_score AS pf,
+                away_score AS pa,
+
+                home_female_tries AS female_tries,
+                home_conduct AS conduct,
+                home_unstripped AS unstripped,
+
+                updated_at
+            FROM base
+
+            UNION ALL
+
+            SELECT
+                game_id, start_dt, field_name,
+                away_team AS team,
+                home_team AS opponent,
+                away_division AS division,
+
+                away_score AS pf,
+                home_score AS pa,
+
+                away_female_tries AS female_tries,
+                away_conduct AS conduct,
+                away_unstripped AS unstripped,
+
+                updated_at
+            FROM base
+        )
+        SELECT
+            game_id,
+            start_dt,
+            field_name,
+            division,
+            team,
+            opponent,
+            pf,
+            pa,
+            (pf - pa) AS margin,
+
+            CASE
+              WHEN pf > pa THEN 'W'
+              WHEN pf = pa THEN 'D'
+              ELSE 'L'
+            END AS result,
+
+            CASE
+              WHEN pf > pa THEN ?
+              WHEN pf = pa THEN ?
+              ELSE ?
+            END AS match_pts,
+
+            CASE
+              WHEN pf < pa AND (pa - pf) IN (1,2) THEN 1 ELSE 0
+            END AS close_loss_bp,
+
+            female_tries,
+            CASE WHEN female_tries >= 4 THEN 1 ELSE 0 END AS female_bp,
+
+            conduct,
+
+            unstripped,
+            CASE WHEN unstripped >= 3 THEN -2 ELSE 0 END AS unstripped_pen,
+
+            updated_at
+        FROM teamsplit
+        ORDER BY start_dt ASC, field_name ASC, team ASC
+        """,
+        (start_min, start_max, LADDER_WIN_PTS, LADDER_DRAW_PTS, LADDER_LOSS_PTS),
+    ).fetchall()
+    conn.close()
+
+    out = []
+    for r in rows:
+        match_pts = int(r["match_pts"] or 0)
+        close_bp = int(r["close_loss_bp"] or 0)
+        female_bp = int(r["female_bp"] or 0)
+        conduct = int(r["conduct"] or 0)
+        pen = int(r["unstripped_pen"] or 0)
+
+        total = match_pts + close_bp + female_bp + conduct + pen
+
+        out.append(
+            {
+                "Start": _time_12h(dtparser.parse(r["start_dt"])) if r["start_dt"] else "—",
+                "Field": r["field_name"] or "—",
+                "Division": (r["division"] or "").strip() or "—",
+                "Team": r["team"] or "—",
+                "Opponent": r["opponent"] or "—",
+                "PF": int(r["pf"] or 0),
+                "PA": int(r["pa"] or 0),
+                "Res": r["result"] or "—",
+                "Match": match_pts,
+                "CloseBP": close_bp,
+                "FemTries": int(r["female_tries"] or 0),
+                "FemBP": female_bp,
+                "Conduct": conduct,
+                "Unstrip": int(r["unstripped"] or 0),
+                "Pen": pen,
+                "Total": total,
+                "Updated": (r["updated_at"] or "")[:19],
+            }
+        )
+
+    return pd.DataFrame(out)
+
+
+def ladder_table_df_for_date(selected_date: date, division: str) -> pd.DataFrame:
+    """
+    Aggregated ladder for the selected date only.
+    If you want season-to-date later, we can switch from date window to a wider range.
+    """
+    df = ladder_audit_df_for_date(selected_date)
+    if df.empty:
+        return pd.DataFrame()
+
+    df = df[df["Division"].fillna("—") == (division or "—")]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Aggregate
+    grouped = df.groupby("Team", dropna=False).agg(
+        P=("Team", "count"),
+        W=("Res", lambda s: int((s == "W").sum())),
+        D=("Res", lambda s: int((s == "D").sum())),
+        L=("Res", lambda s: int((s == "L").sum())),
+        PF=("PF", "sum"),
+        PA=("PA", "sum"),
+        Match=("Match", "sum"),
+        CloseBP=("CloseBP", "sum"),
+        FemBP=("FemBP", "sum"),
+        Conduct=("Conduct", "sum"),
+        Pen=("Pen", "sum"),
+        Total=("Total", "sum"),
+    ).reset_index()
+
+    grouped["PD"] = grouped["PF"] - grouped["PA"]
+
+    # Sort: Total desc, PD desc, PF desc, Team asc
+    grouped = grouped.sort_values(
+        by=["Total", "PD", "PF", "Team"],
+        ascending=[False, False, False, True],
+    ).reset_index(drop=True)
+
+    # Reorder columns nicely
+    grouped = grouped[
+        ["Team", "P", "W", "D", "L", "PF", "PA", "PD", "Match", "CloseBP", "FemBP", "Conduct", "Pen", "Total"]
+    ]
+    return grouped
+
+
+def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
+    """
+    Collects human-friendly warnings to help admins fault-find quickly.
+    """
+    warnings: list[str] = []
+
+    games = get_games()
+    todays = [g for g in games if game_local_date(g) == selected_date]
+    if not todays:
+        return warnings
+
+    # Team division coverage
+    missing_div = set()
+    mismatch_div_games = []
+
+    for g in todays:
+        h = (g["home_team"] or "").strip()
+        a = (g["away_team"] or "").strip()
+        dh = get_team_division(h)
+        da = get_team_division(a)
+
+        if not dh:
+            missing_div.add(h)
+        if not da:
+            missing_div.add(a)
+        if dh and da and dh != da:
+            mismatch_div_games.append(f"{h} vs {a} ({dh} / {da})")
+
+    if missing_div:
+        warnings.append("Missing team division for: " + ", ".join(sorted(missing_div)))
+
+    if mismatch_div_games:
+        warnings.append("Cross-division games detected: " + "; ".join(mismatch_div_games))
+
+    # Results completeness + sanity checks
+    for g in todays:
+        gr = get_game_result(int(g["id"]))
+        if not gr:
+            warnings.append(f"Missing result entry: {g['home_team']} vs {g['away_team']}")
+            continue
+
+        # Conduct range
+        for side in ("home", "away"):
+            c = int(gr[f"{side}_conduct"] or 0)
+            if c < 0 or c > 10:
+                warnings.append(
+                    f"Conduct out of range (0-10): {g['home_team']} vs {g['away_team']} ({side}={c})"
+                )
+
+        # Negative checks
+        for k in [
+            "home_score","away_score",
+            "home_female_tries","away_female_tries",
+            "home_unstripped","away_unstripped",
+        ]:
+            v = int(gr[k] or 0)
+            if v < 0:
+                warnings.append(f"Negative value {k} for game: {g['home_team']} vs {g['away_team']}")
+
+    return warnings
+
         """
         SELECT
             a.id,
@@ -1772,7 +2194,7 @@ if not st.session_state.get("admin_email"):
 # Logged in view
 admin_logout_button()
 
-tabs = st.tabs(["Admin", "Import", "Blackouts", "Administrators"])
+tabs = st.tabs(["Admin", "Ladder", "Import", "Blackouts", "Administrators"])
 
 
 # ============================================================
@@ -1819,6 +2241,184 @@ with tabs[3]:
                 st.rerun()
     else:
         st.info("No active admins found (you should add at least one).")
+
+# ============================================================
+# Ladder tab
+# ============================================================
+with tabs[1]:
+    st.subheader("Competition Ladder (Admin)")
+    st.caption("Enter team divisions + game results, then view ladder + audit breakdown for fault finding.")
+
+    games = get_games()
+    if not games:
+        st.info("Import a Games CSV first.")
+        st.stop()
+
+    all_dates = sorted({game_local_date(g) for g in games})
+    if not all_dates:
+        st.info("No game dates found.")
+        st.stop()
+
+    today = date.today()
+    default_idx = 0
+    for i, d in enumerate(all_dates):
+        if d >= today:
+            default_idx = i
+            break
+
+    selected_date = st.selectbox(
+        "Ladder date",
+        all_dates,
+        index=default_idx,
+        key="ladder_date_select",
+    )
+
+    todays_games = [g for g in games if game_local_date(g) == selected_date]
+    st.caption(f"{len(todays_games)} game(s) on {selected_date.isoformat()}")
+
+    st.markdown("---")
+    st.markdown("### 1) Team divisions")
+
+    # Quick-add/update divisions for any teams that appear today
+    teams_today = sorted({(g["home_team"] or "").strip() for g in todays_games} | {(g["away_team"] or "").strip() for g in todays_games})
+    teams_today = [t for t in teams_today if t]
+
+    existing = {t["name"]: t["division"] for t in list_teams()}
+
+    if not teams_today:
+        st.info("No teams found for this date.")
+        st.stop()
+
+    div_col1, div_col2 = st.columns([2, 1], gap="large")
+
+    with div_col1:
+        st.write("Set division per team (saved immediately).")
+        for t in teams_today:
+            current = (existing.get(t) or "").strip()
+            key = f"div_{selected_date.isoformat()}_{t}"
+            new_val = st.text_input(f"{t}", value=current, key=key, placeholder="e.g. Division 1")
+            if new_val.strip() and new_val.strip() != current:
+                upsert_team(t, new_val.strip())
+                # refresh local cache
+                existing[t] = new_val.strip()
+
+    with div_col2:
+        st.write("Teams (today)")
+        st.dataframe(
+            pd.DataFrame([{"Team": t, "Division": (existing.get(t) or "").strip() or "—"} for t in teams_today]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("---")
+    st.markdown("### 2) Enter game results (scores + referee inputs)")
+
+    if not todays_games:
+        st.info("No games found for this date.")
+        st.stop()
+
+    for g in todays_games:
+        start_dt = dtparser.parse(g["start_dt"])
+        title = f"{g['home_team']} vs {g['away_team']} — {g['field_name']} @ {_time_12h(start_dt)}"
+
+        gr = get_game_result(int(g["id"]))
+
+        # Defaults
+        d_home_score = int(gr["home_score"]) if gr else 0
+        d_away_score = int(gr["away_score"]) if gr else 0
+
+        d_hft = int(gr["home_female_tries"]) if gr else 0
+        d_aft = int(gr["away_female_tries"]) if gr else 0
+
+        d_hc = int(gr["home_conduct"]) if gr else 0
+        d_ac = int(gr["away_conduct"]) if gr else 0
+
+        d_hu = int(gr["home_unstripped"]) if gr else 0
+        d_au = int(gr["away_unstripped"]) if gr else 0
+
+        with st.container(border=True):
+            st.markdown(f"**{title}**")
+
+            c1, c2, c3 = st.columns([1, 1, 1], gap="large")
+
+            with c1:
+                st.markdown("**Score**")
+                home_score = st.number_input(f"{g['home_team']} score", min_value=0, step=1, value=d_home_score, key=f"hs_{g['id']}")
+                away_score = st.number_input(f"{g['away_team']} score", min_value=0, step=1, value=d_away_score, key=f"as_{g['id']}")
+
+            with c2:
+                st.markdown("**Female tries**")
+                home_ft = st.number_input(f"{g['home_team']} female tries", min_value=0, step=1, value=d_hft, key=f"hft_{g['id']}")
+                away_ft = st.number_input(f"{g['away_team']} female tries", min_value=0, step=1, value=d_aft, key=f"aft_{g['id']}")
+
+            with c3:
+                st.markdown("**Conduct / Unstripped**")
+                home_conduct = st.number_input(f"{g['home_team']} conduct (/10)", min_value=0, max_value=10, step=1, value=d_hc, key=f"hc_{g['id']}")
+                away_conduct = st.number_input(f"{g['away_team']} conduct (/10)", min_value=0, max_value=10, step=1, value=d_ac, key=f"ac_{g['id']}")
+
+                home_un = st.number_input(f"{g['home_team']} unstripped", min_value=0, step=1, value=d_hu, key=f"hu_{g['id']}")
+                away_un = st.number_input(f"{g['away_team']} unstripped", min_value=0, step=1, value=d_au, key=f"au_{g['id']}")
+
+            save_key = f"save_res_{g['id']}"
+            if st.button("Save result", key=save_key):
+                upsert_game_result(
+                    game_id=int(g["id"]),
+                    home_score=int(home_score),
+                    away_score=int(away_score),
+                    home_female_tries=int(home_ft),
+                    away_female_tries=int(away_ft),
+                    home_conduct=int(home_conduct),
+                    away_conduct=int(away_conduct),
+                    home_unstripped=int(home_un),
+                    away_unstripped=int(away_un),
+                )
+                st.success("Saved.")
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 3) Ladder + audit (fault finding)")
+
+    warnings = ladder_validation_warnings_for_date(selected_date)
+    if warnings:
+        st.warning("Warnings:\n- " + "\n- ".join(warnings))
+
+    df_audit = ladder_audit_df_for_date(selected_date)
+    if df_audit.empty:
+        st.info("No audit rows yet. Enter at least one result above.")
+        st.stop()
+
+    divisions = sorted([d for d in df_audit["Division"].unique().tolist() if d and d != "—"])
+    if not divisions:
+        divisions = ["—"]
+
+    div_choice = st.selectbox("Division", divisions, key="ladder_div_select")
+
+    df_ladder = ladder_table_df_for_date(selected_date, div_choice)
+    if df_ladder.empty:
+        st.info("No ladder rows for this division/date.")
+    else:
+        st.markdown("#### Ladder")
+        st.dataframe(df_ladder, use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "Download ladder CSV",
+            data=df_ladder.to_csv(index=False).encode("utf-8"),
+            file_name=f"ladder_{div_choice}_{selected_date.isoformat()}.csv".replace(" ", "_"),
+            mime="text/csv",
+            key="ladder_csv_btn",
+        )
+
+    st.markdown("#### Audit table (per team per game)")
+    df_audit_show = df_audit[df_audit["Division"].fillna("—") == (div_choice or "—")]
+    st.dataframe(df_audit_show, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Download audit CSV",
+        data=df_audit_show.to_csv(index=False).encode("utf-8"),
+        file_name=f"audit_{div_choice}_{selected_date.isoformat()}.csv".replace(" ", "_"),
+        mime="text/csv",
+        key="audit_csv_btn",
+    )
 
 
 # ============================================================
@@ -2012,7 +2612,7 @@ with tabs[0]:
             )
 
             total_acc = int(df_work["Accepted"].sum()) if "Accepted" in df_work.columns else 0
-            st.caption(f"Total accepted/assigned slots this week: {total_acc}")
+            st.caption(f"Total accepted/assigned slots (all-time): {total_acc}")
 
     # ----------------------------
     # MAIN (LEFT) CONTENT
