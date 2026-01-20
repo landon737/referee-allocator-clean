@@ -62,6 +62,32 @@ def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
         width=0,
     )
 
+def try_close_browser_tab(message: str = "Login link sent. You can close this tab now."):
+    """
+    Attempts to close the current browser tab.
+    NOTE: Most browsers only allow window.close() if this tab was opened by script (popup).
+    """
+    components.html(
+        f"""
+        <div style="font-family: Arial, sans-serif; padding: 12px 0;">
+          <div style="font-weight:700;">{message}</div>
+          <div style="color:#666; font-size:12px; margin-top:6px;">
+            If this tab doesn't close automatically, your browser blocked it — just close it normally.
+          </div>
+        </div>
+        <script>
+          (function() {{
+            try {{
+              // Some browsers allow this only for script-opened windows
+              window.open('', '_self');
+              window.close();
+            }} catch (e) {{}}
+          }})();
+        </script>
+        """,
+        height=90,
+    )
+
 from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
 from email.mime.text import MIMEText
@@ -2364,6 +2390,9 @@ if not st.session_state.get("admin_email"):
     st.write("Enter your email to receive a one-time login link (15 minutes).")
     email = st.text_input("Admin email", key="login_email")
 
+    # Optional: let you control behavior without changing code later
+    close_after_send = st.checkbox("Close this tab after sending the login email", value=True)
+
     if st.button("Send login link", key="send_login_link_btn"):
         if not email.strip():
             st.error("Please enter an email.")
@@ -2373,10 +2402,17 @@ if not st.session_state.get("admin_email"):
             try:
                 send_admin_login_email(email)
                 st.success("Login link sent. Check your email.")
+
+                if close_after_send:
+                    # Give the browser a moment to paint the success state, then try close
+                    try_close_browser_tab("Login link sent. This tab will try to close now.")
+                    st.stop()
+
             except Exception as e:
                 st.error(str(e))
 
     st.stop()
+
 
 # Logged in view
 admin_logout_button()
