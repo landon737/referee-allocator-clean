@@ -1016,32 +1016,45 @@ def send_html_email(
     text_body: str | None = None,
 ):
     cfg = smtp_settings()
-    if not (
-        cfg["host"]
-        and cfg["user"]
-        and cfg["password"]
-        and cfg["from_email"]
-        and cfg["app_base_url"]
-    ):
+
+    # NOTE: APP_BASE_URL isn't required to SEND an email, only to generate links elsewhere.
+    if not (cfg["host"] and cfg["user"] and cfg["password"] and cfg["from_email"]):
         raise RuntimeError(
             "Email not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, "
-            "SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL."
+            "SMTP_FROM_EMAIL, SMTP_FROM_NAME (and APP_BASE_URL for login/offer links)."
         )
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f'{cfg["from_name"]} <{cfg["from_email"]}>'
-    msg["To"] = f"{to_name} <{to_email}>"
+    # Avoid putting an email address as a "name" (some providers treat this as spammy)
+    safe_name = (to_name or "").strip()
+    if "@" in safe_name:
+        safe_name = ""
+    msg["To"] = f"{safe_name} <{to_email}>" if safe_name else to_email
 
     if not text_body:
         text_body = "You have a notification from Referee Allocator."
     msg.attach(MIMEText(text_body, "plain"))
     msg.attach(MIMEText(html_body, "html"))
 
-    with smtplib.SMTP(cfg["host"], cfg["port"]) as server:
-        server.starttls()
-        server.login(cfg["user"], cfg["password"])
-        server.sendmail(cfg["from_email"], [to_email], msg.as_string())
+    port = int(cfg["port"] or 587)
+
+    # Support both STARTTLS (587) and SSL (465)
+    use_ssl = str(os.getenv("SMTP_USE_SSL", "")).lower() in ("1", "true", "yes") or port == 465
+
+    if use_ssl:
+        with smtplib.SMTP_SSL(cfg["host"], port, timeout=20) as server:
+            server.ehlo()
+            server.login(cfg["user"], cfg["password"])
+            server.sendmail(cfg["from_email"], [to_email], msg.as_string())
+    else:
+        with smtplib.SMTP(cfg["host"], port, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(cfg["user"], cfg["password"])
+            server.sendmail(cfg["from_email"], [to_email], msg.as_string())
 
 
 # ============================================================
@@ -2995,16 +3008,24 @@ if not st.session_state.get("admin_email"):
     email = st.text_input("Admin email", key="login_email")
 
     if st.button("Send login link", key="send_login_link_btn"):
-        if not email.strip():
-            st.error("Please enter an email.")
-        elif not is_admin_email_allowed(email):
-            st.error("That email is not an authorised administrator.")
-        else:
-            try:
-                send_admin_login_email(email)
-                st.success("Login link sent. Check your email.")
-            except Exception as e:
-                st.error(str(e))
+    if not email.strip():
+        st.error("Please enter an email.")
+    elif not is_admin_email_allowed(email):
+        st.error("That email is not an authorised administrator.")
+    else:
+        try:
+            login_url = send_admin_login_email(email)
+
+            st.success("Login link generated.")
+            st.info("If the email doesn’t arrive, use this link directly:")
+
+            st.code(login_url)
+
+            # Optional convenience button
+            st.markdown(f"[Open login link]({login_url})")
+
+        except Exception as e:
+            st.error(f"Failed to send login link: {e}")
 
     st.stop()
 
