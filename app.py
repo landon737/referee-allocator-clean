@@ -3178,7 +3178,7 @@ with tabs[0]:
                     else:
                         status_badge("EMPTY", "#616161")
 
-                    # Current selection
+                                        # Current referee label for the referee picker
                     current_label = "— (unassigned)"
                     if a["referee_id"]:
                         nm = (a["ref_name"] or "").strip()
@@ -3186,6 +3186,7 @@ with tabs[0]:
                         if nm and em:
                             current_label = f"{nm} ({em})"
 
+                    # Referee picker (this is the big dropdown you already see)
                     pick = st.selectbox(
                         "Referee",
                         options=ref_options,
@@ -3194,39 +3195,77 @@ with tabs[0]:
                         label_visibility="collapsed",
                     )
 
-                    # Apply assignment change
-                    if pick == "— (unassigned)":
-                        if a["referee_id"]:
-                            if st.button("Clear", key=f"clear_{a['id']}"):
-                                clear_assignment(int(a["id"]))
-                                st.rerun()
-                    else:
-                        new_ref_id = ref_lookup.get(pick)
-                        if new_ref_id and int(a["referee_id"] or 0) != int(new_ref_id):
-                            if st.button("Assign", key=f"assign_{a['id']}"):
-                                set_assignment_ref(int(a["id"]), int(new_ref_id))
-                                st.rerun()
+                    # Action dropdown (THIS is what you’re missing)
+                    # Options depend on whether a referee is selected + current status
+                    stt = (a["status"] or "EMPTY").strip().upper()
+                    has_ref_selected = pick != "— (unassigned)"
 
-                        # Offer button (only if referee selected)
-                        if st.button("Offer", key=f"offer_{a['id']}"):
-                            live = get_assignment_live(int(a["id"]))
-                            msg_key = f"offer_msg_{a['id']}"
-                            if not live or not live["referee_id"]:
+                    action_options = ["—"]
+                    if has_ref_selected:
+                        action_options += ["ASSIGN", "OFFER"]
+                    if a["referee_id"]:
+                        action_options += ["CLEAR"]
+
+                    # (Optional) if you want a manual way to mark as ASSIGNED without emailing:
+                    # if a["referee_id"]:
+                    #     action_options += ["MARK ASSIGNED"]
+
+                    action = st.selectbox(
+                        "Action",
+                        options=action_options,
+                        index=0,
+                        key=f"slot_action_{a['id']}",
+                        label_visibility="collapsed",
+                    )
+
+                    if st.button("Apply", key=f"slot_apply_{a['id']}"):
+                        if action == "—":
+                            st.info("Choose an action first.")
+                        elif action == "CLEAR":
+                            clear_assignment(int(a["id"]))
+                            st.rerun()
+                        elif action == "ASSIGN":
+                            if not has_ref_selected:
                                 st.error("Select a referee first.")
                             else:
-                                send_offer_email_and_mark_offered(
-                                    assignment_id=int(live["id"]),
-                                    referee_name=live["ref_name"] or "Referee",
-                                    referee_email=live["ref_email"] or "",
-                                    game=g,
-                                    start_dt=dtparser.parse(g["start_dt"]),
-                                    msg_key=msg_key,
-                                )
-                            if st.session_state.get(msg_key):
-                                st.caption(st.session_state[msg_key])
+                                new_ref_id = ref_lookup.get(pick)
+                                if not new_ref_id:
+                                    st.error("Invalid referee selection.")
+                                else:
+                                    set_assignment_ref(int(a["id"]), int(new_ref_id))
+                                    st.rerun()
+                        elif action == "OFFER":
+                            if not has_ref_selected:
+                                st.error("Select a referee first.")
+                            else:
+                                # Ensure the assignment row matches the selected pick before offering
+                                new_ref_id = ref_lookup.get(pick)
+                                if not new_ref_id:
+                                    st.error("Invalid referee selection.")
+                                else:
+                                    # If pick differs from DB, set it first
+                                    if int(a["referee_id"] or 0) != int(new_ref_id):
+                                        set_assignment_ref(int(a["id"]), int(new_ref_id))
 
-                    # Small spacing
+                                    live = get_assignment_live(int(a["id"]))
+                                    msg_key = f"offer_msg_{a['id']}"
+                                    if not live or not live["referee_id"]:
+                                        st.error("Select a referee first.")
+                                    else:
+                                        send_offer_email_and_mark_offered(
+                                            assignment_id=int(live["id"]),
+                                            referee_name=live["ref_name"] or "Referee",
+                                            referee_email=live["ref_email"] or "",
+                                            game=g,
+                                            start_dt=dtparser.parse(g["start_dt"]),
+                                            msg_key=msg_key,
+                                        )
+                                        if st.session_state.get(msg_key):
+                                            st.caption(st.session_state[msg_key])
+                                    st.rerun()
+
                     st.caption(" ")
+
 
 # ========================================================
 # Games & Assignments (Actions dropdown restored)
