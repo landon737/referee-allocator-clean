@@ -3018,7 +3018,9 @@ tabs = st.tabs(["Admin", "Ladder", "Import", "Blackouts", "Administrators"])
 # Admin tab
 # ============================================================
 with tabs[0]:
-    preserve_scroll("refalloc_admin_scroll")  # ✅ keeps scroll position on refresh/autorefresh
+    # Keep scroll position stable across reruns/autorefresh
+    preserve_scroll("refalloc_admin_scroll")
+
     st.subheader("Games & Assignments")
 
     # --- Auto refresh ---
@@ -3053,23 +3055,21 @@ with tabs[0]:
         key="games_date_select",
     )
 
-    count_games = sum(1 for g in games if game_local_date(g) == selected_date)
-    st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
+    todays_games = [g for g in games if game_local_date(g) == selected_date]
+    st.caption(f"{len(todays_games)} game(s) on {selected_date.isoformat()}")
 
     # ========================================================
-    # Printable Summary (PDF + XLSX)
+    # Printable Summary (PDF + XLSX + Scorecards PDF)
     # ========================================================
     st.markdown("---")
     st.subheader("Printable Summary")
 
-    c1, c2, c3 = st.columns([1, 1, 2])
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
 
     with c1:
         if st.button("Build PDF", key="build_pdf_btn"):
             try:
-                st.session_state["admin_summary_pdf_bytes"] = (
-                    build_admin_summary_pdf_bytes(selected_date)
-                )
+                st.session_state["admin_summary_pdf_bytes"] = build_admin_summary_pdf_bytes(selected_date)
                 st.success("PDF built.")
             except Exception as e:
                 st.error(f"Failed to build PDF: {e}")
@@ -3077,18 +3077,25 @@ with tabs[0]:
     with c2:
         if st.button("Build XLSX", key="build_xlsx_btn"):
             try:
-                st.session_state["admin_summary_xlsx_bytes"] = (
-                    build_admin_summary_xlsx_bytes(selected_date)
-                )
+                st.session_state["admin_summary_xlsx_bytes"] = build_admin_summary_xlsx_bytes(selected_date)
                 st.success("XLSX built.")
             except Exception as e:
                 st.error(f"Failed to build XLSX: {e}")
 
     with c3:
+        if st.button("Build Scorecards", key="build_scorecards_btn"):
+            try:
+                st.session_state["ref_scorecards_pdf_bytes"] = build_referee_scorecards_pdf_bytes(selected_date)
+                st.success("Scorecards PDF built.")
+            except Exception as e:
+                st.error(f"Failed to build scorecards: {e}")
+
+    with c4:
         pdf_bytes = st.session_state.get("admin_summary_pdf_bytes")
         xlsx_bytes = st.session_state.get("admin_summary_xlsx_bytes")
+        score_bytes = st.session_state.get("ref_scorecards_pdf_bytes")
 
-        d1, d2 = st.columns(2)
+        d1, d2, d3 = st.columns(3)
 
         with d1:
             if pdf_bytes:
@@ -3114,12 +3121,111 @@ with tabs[0]:
             else:
                 st.caption("Build XLSX first.")
 
-    st.markdown("---")
+        with d3:
+            if score_bytes:
+                st.download_button(
+                    label="Download Scorecards",
+                    data=score_bytes,
+                    file_name=f"referee_scorecards_{selected_date.isoformat()}.pdf",
+                    mime="application/pdf",
+                    key="download_scorecards_btn",
+                )
+            else:
+                st.caption("Build scorecards first.")
 
     # ========================================================
-    # Existing per-game assignment UI continues BELOW this
-    # (leave your current game/slot code exactly as it is)
+    # Games & Assignments (RESTORED)
     # ========================================================
+    st.markdown("---")
+
+    if not todays_games:
+        st.info("No games found for this date.")
+        st.stop()
+
+    # Referee options
+    ref_options = ["— (unassigned)"] + [f"{r['name']} ({r['email']})" for r in refs]
+    ref_lookup = {f"{r['name']} ({r['email']})": int(r["id"]) for r in refs}
+
+    for g in todays_games:
+        start_dt = dtparser.parse(g["start_dt"])
+        header = f"{g['home_team']} vs {g['away_team']} — {g['field_name']} @ {_time_12h(start_dt)}"
+
+        with st.container(border=True):
+            st.markdown(f"**{header}**")
+
+            assigns = get_assignments_for_game(int(g["id"]))
+            if not assigns:
+                st.caption("No assignment slots found for this game.")
+                continue
+
+            slot_cols = st.columns(len(assigns))
+
+            for idx, a in enumerate(assigns):
+                with slot_cols[idx]:
+                    st.markdown(f"**Slot {a['slot_no']}**")
+
+                    # Status badge
+                    stt = (a["status"] or "EMPTY").strip().upper()
+                    if stt in ("ACCEPTED", "ASSIGNED"):
+                        status_badge(stt, "#2e7d32")
+                    elif stt == "DECLINED":
+                        status_badge(stt, "#c62828")
+                    elif stt == "OFFERED":
+                        status_badge(stt, "#1565c0")
+                    elif stt == "NOT_OFFERED":
+                        status_badge("NOT OFFERED", "#6d4c41")
+                    else:
+                        status_badge("EMPTY", "#616161")
+
+                    # Current selection
+                    current_label = "— (unassigned)"
+                    if a["referee_id"]:
+                        nm = (a["ref_name"] or "").strip()
+                        em = (a["ref_email"] or "").strip()
+                        if nm and em:
+                            current_label = f"{nm} ({em})"
+
+                    pick = st.selectbox(
+                        "Referee",
+                        options=ref_options,
+                        index=ref_options.index(current_label) if current_label in ref_options else 0,
+                        key=f"refpick_{g['id']}_{a['id']}",
+                        label_visibility="collapsed",
+                    )
+
+                    # Apply assignment change
+                    if pick == "— (unassigned)":
+                        if a["referee_id"]:
+                            if st.button("Clear", key=f"clear_{a['id']}"):
+                                clear_assignment(int(a["id"]))
+                                st.rerun()
+                    else:
+                        new_ref_id = ref_lookup.get(pick)
+                        if new_ref_id and int(a["referee_id"] or 0) != int(new_ref_id):
+                            if st.button("Assign", key=f"assign_{a['id']}"):
+                                set_assignment_ref(int(a["id"]), int(new_ref_id))
+                                st.rerun()
+
+                        # Offer button (only if referee selected)
+                        if st.button("Offer", key=f"offer_{a['id']}"):
+                            live = get_assignment_live(int(a["id"]))
+                            msg_key = f"offer_msg_{a['id']}"
+                            if not live or not live["referee_id"]:
+                                st.error("Select a referee first.")
+                            else:
+                                send_offer_email_and_mark_offered(
+                                    assignment_id=int(live["id"]),
+                                    referee_name=live["ref_name"] or "Referee",
+                                    referee_email=live["ref_email"] or "",
+                                    game=g,
+                                    start_dt=dtparser.parse(g["start_dt"]),
+                                    msg_key=msg_key,
+                                )
+                            if st.session_state.get(msg_key):
+                                st.caption(st.session_state[msg_key])
+
+                    # Small spacing
+                    st.caption(" ")
 
 
 # ============================================================
