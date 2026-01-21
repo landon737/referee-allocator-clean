@@ -3136,16 +3136,6 @@ with tabs[1]:
                                 "**Allocate 10 points for Conduct and 3 points for the Win**"
                             )
 
-                # Messages only (no scoring automation)
-                if home_defaulted and away_defaulted:
-                    st.error("Only ONE team can be marked as DEFAULTED.")
-                elif home_defaulted:
-                    st.info("Allocate 10 points for Conduct")  # for the defaulting team
-                    st.info("Allocate 10 points for Conduct and 3 points for the Win")  # for opponent
-                elif away_defaulted:
-                    st.info("Allocate 10 points for Conduct")  # for the defaulting team
-                    st.info("Allocate 10 points for Conduct and 3 points for the Win")  # for opponent
-
 
             if st.button("Save result", key=f"save_res_{g['id']}"):
                 if home_defaulted and away_defaulted:
