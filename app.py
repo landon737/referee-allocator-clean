@@ -3096,16 +3096,42 @@ with tabs[1]:
                 st.markdown("---")
                 st.markdown("**Defaulted**")
 
-                home_defaulted = st.checkbox(
+                # Two-column rows: checkbox | message
+                r1c1, r1c2 = st.columns([1, 2])
+                r2c1, r2c2 = st.columns([1, 2])
+
+                home_defaulted = r1c1.checkbox(
                     f"{g['home_team']} DEFAULTED",
                     value=bool(d_hd),
                     key=f"hd_{g['id']}",
                 )
-                away_defaulted = st.checkbox(
+
+                away_defaulted = r2c1.checkbox(
                     f"{g['away_team']} DEFAULTED",
                     value=bool(d_ad),
                     key=f"ad_{g['id']}",
                 )
+
+                # Guard: only one team can default
+                if home_defaulted and away_defaulted:
+                    r1c2.error("Only ONE team can be marked as DEFAULTED.")
+                    r2c2.error("Only ONE team can be marked as DEFAULTED.")
+                else:
+                    # Home team row message
+                    if home_defaulted:
+                        r1c2.markdown("**Allocate 10 points for Conduct**")
+                    else:
+                        r1c2.markdown(
+                            "**Allocate 10 points for Conduct and 3 points for the Win**"
+                        )
+
+                    # Away team row message
+                    if away_defaulted:
+                        r2c2.markdown("**Allocate 10 points for Conduct**")
+                    else:
+                        r2c2.markdown(
+                            "**Allocate 10 points for Conduct and 3 points for the Win**"
+                        )
 
                 # Messages only (no scoring automation)
                 if home_defaulted and away_defaulted:
