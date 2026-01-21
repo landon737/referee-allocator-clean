@@ -204,6 +204,7 @@ def ensure_ladder_tables():
     try:
         cur = conn.cursor()
 
+        # Teams
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS teams (
@@ -215,12 +216,12 @@ def ensure_ladder_tables():
             """
         )
 
-        # If teams table already existed without opening_balance, add it safely
         cols = conn.execute("PRAGMA table_info(teams);").fetchall()
         col_names = {c["name"] for c in cols}
         if "opening_balance" not in col_names:
             conn.execute("ALTER TABLE teams ADD COLUMN opening_balance INTEGER NOT NULL DEFAULT 0;")
 
+        # Game results (new installs include default flags)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS game_results (
@@ -239,12 +240,24 @@ def ensure_ladder_tables():
                 home_unstripped INTEGER NOT NULL DEFAULT 0,
                 away_unstripped INTEGER NOT NULL DEFAULT 0,
 
+                home_defaulted INTEGER NOT NULL DEFAULT 0,  -- 0/1
+                away_defaulted INTEGER NOT NULL DEFAULT 0,  -- 0/1
+
                 updated_at TEXT NOT NULL,
 
                 FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
             );
             """
         )
+
+        # Existing DBs: add the columns if missing
+        cols = conn.execute("PRAGMA table_info(game_results);").fetchall()
+        gr_cols = {c["name"] for c in cols}
+
+        if "home_defaulted" not in gr_cols:
+            conn.execute("ALTER TABLE game_results ADD COLUMN home_defaulted INTEGER NOT NULL DEFAULT 0;")
+        if "away_defaulted" not in gr_cols:
+            conn.execute("ALTER TABLE game_results ADD COLUMN away_defaulted INTEGER NOT NULL DEFAULT 0;")
 
         conn.commit()
     finally:
@@ -1126,64 +1139,6 @@ DIVISIONS = [
 ]
 
 
-def ensure_ladder_tables():
-    """
-    Safe migrations for ladder system:
-    - teams: team name + division + opening_balance
-    - game_results: one row per game with admin-entered scoring inputs
-    """
-    conn = db()
-    try:
-        cur = conn.cursor()
-
-        # New installs: include opening_balance in CREATE TABLE
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS teams (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                division TEXT NOT NULL,
-                opening_balance INTEGER NOT NULL DEFAULT 0
-            );
-            """
-        )
-
-        # Existing DBs: add column if missing
-        cols = conn.execute("PRAGMA table_info(teams);").fetchall()
-        col_names = {c["name"] for c in cols}
-        if "opening_balance" not in col_names:
-            conn.execute("ALTER TABLE teams ADD COLUMN opening_balance INTEGER NOT NULL DEFAULT 0;")
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS game_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_id INTEGER NOT NULL UNIQUE,
-
-                home_score INTEGER NOT NULL DEFAULT 0,
-                away_score INTEGER NOT NULL DEFAULT 0,
-
-                home_female_tries INTEGER NOT NULL DEFAULT 0,
-                away_female_tries INTEGER NOT NULL DEFAULT 0,
-
-                home_conduct INTEGER NOT NULL DEFAULT 0,   -- 0..10
-                away_conduct INTEGER NOT NULL DEFAULT 0,   -- 0..10
-
-                home_unstripped INTEGER NOT NULL DEFAULT 0,
-                away_unstripped INTEGER NOT NULL DEFAULT 0,
-
-                updated_at TEXT NOT NULL,
-
-                FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
-            );
-            """
-        )
-
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def upsert_team(name: str, division: str, opening_balance: int = 0):
     name = (name or "").strip()
     division = (division or "").strip()
@@ -1244,6 +1199,8 @@ def get_game_result(game_id: int) -> sqlite3.Row | None:
             home_female_tries, away_female_tries,
             home_conduct, away_conduct,
             home_unstripped, away_unstripped,
+            COALESCE(home_defaulted,0) AS home_defaulted,
+            COALESCE(away_defaulted,0) AS away_defaulted,
             updated_at
         FROM game_results
         WHERE game_id=?
@@ -1266,6 +1223,8 @@ def upsert_game_result(
     away_conduct: int,
     home_unstripped: int,
     away_unstripped: int,
+    home_defaulted: int = 0,
+    away_defaulted: int = 0,
 ):
     conn = db()
     try:
@@ -1277,9 +1236,10 @@ def upsert_game_result(
                 home_female_tries, away_female_tries,
                 home_conduct, away_conduct,
                 home_unstripped, away_unstripped,
+                home_defaulted, away_defaulted,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(game_id) DO UPDATE SET
                 home_score=excluded.home_score,
                 away_score=excluded.away_score,
@@ -1289,6 +1249,8 @@ def upsert_game_result(
                 away_conduct=excluded.away_conduct,
                 home_unstripped=excluded.home_unstripped,
                 away_unstripped=excluded.away_unstripped,
+                home_defaulted=excluded.home_defaulted,
+                away_defaulted=excluded.away_defaulted,
                 updated_at=excluded.updated_at
             """,
             (
@@ -1297,6 +1259,8 @@ def upsert_game_result(
                 int(home_female_tries), int(away_female_tries),
                 int(home_conduct), int(away_conduct),
                 int(home_unstripped), int(away_unstripped),
+                1 if int(home_defaulted or 0) else 0,
+                1 if int(away_defaulted or 0) else 0,
                 now_iso(),
             ),
         )
@@ -3052,6 +3016,9 @@ with tabs[1]:
 
         d_hu = int(gr["home_unstripped"]) if gr else 0
         d_au = int(gr["away_unstripped"]) if gr else 0
+        d_hd = int(gr["home_defaulted"]) if gr else 0
+        d_ad = int(gr["away_defaulted"]) if gr else 0
+
 
         with st.container(border=True):
             st.markdown(f"**{title}**")
@@ -3093,7 +3060,7 @@ with tabs[1]:
                 )
 
             with c3:
-                st.markdown("**Conduct / Unstripped**")
+                st.markdown("**Conduct / Unstripped / Default**")
                 home_conduct = st.number_input(
                     f"{g['home_team']} conduct (/10)",
                     min_value=0,
@@ -3126,20 +3093,50 @@ with tabs[1]:
                     key=f"au_{g['id']}",
                 )
 
-            if st.button("Save result", key=f"save_res_{g['id']}"):
-                upsert_game_result(
-                    game_id=int(g["id"]),
-                    home_score=int(home_score),
-                    away_score=int(away_score),
-                    home_female_tries=int(home_ft),
-                    away_female_tries=int(away_ft),
-                    home_conduct=int(home_conduct),
-                    away_conduct=int(away_conduct),
-                    home_unstripped=int(home_un),
-                    away_unstripped=int(away_un),
+                st.markdown("---")
+                st.markdown("**Defaulted**")
+
+                home_defaulted = st.checkbox(
+                    f"{g['home_team']} DEFAULTED",
+                    value=bool(d_hd),
+                    key=f"hd_{g['id']}",
                 )
-                st.success("Saved.")
-                st.rerun()
+                away_defaulted = st.checkbox(
+                    f"{g['away_team']} DEFAULTED",
+                    value=bool(d_ad),
+                    key=f"ad_{g['id']}",
+                )
+
+                # Messages only (no scoring automation)
+                if home_defaulted and away_defaulted:
+                    st.error("Only ONE team can be marked as DEFAULTED.")
+                elif home_defaulted:
+                    st.info("Allocate 10 points for Conduct")  # for the defaulting team
+                    st.info("Allocate 10 points for Conduct and 3 points for the Win")  # for opponent
+                elif away_defaulted:
+                    st.info("Allocate 10 points for Conduct")  # for the defaulting team
+                    st.info("Allocate 10 points for Conduct and 3 points for the Win")  # for opponent
+
+
+            if st.button("Save result", key=f"save_res_{g['id']}"):
+                if home_defaulted and away_defaulted:
+                    st.error("Cannot save: only one team can be marked as DEFAULTED.")
+                else:
+                    upsert_game_result(
+                        game_id=int(g["id"]),
+                        home_score=int(home_score),
+                        away_score=int(away_score),
+                        home_female_tries=int(home_ft),
+                        away_female_tries=int(away_ft),
+                        home_conduct=int(home_conduct),
+                        away_conduct=int(away_conduct),
+                        home_unstripped=int(home_un),
+                        away_unstripped=int(away_un),
+                        home_defaulted=1 if home_defaulted else 0,
+                        away_defaulted=1 if away_defaulted else 0,
+                    )
+                    st.success("Saved.")
+                    st.rerun()
 
     st.markdown("---")
     st.markdown("### 3) Ladder + audit (fault finding)")
