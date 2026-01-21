@@ -1,43 +1,16 @@
 # app.py
 # Referee Allocator (MVP) — Admin + Referee Portal + Offers + Blackouts + Printable PDFs
 
-# ============================================================
-# Imports
-# ============================================================
 import os
 import sqlite3
 import secrets
 import smtplib
-from pathlib import Path
-from datetime import datetime, date, timedelta, timezone
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from io import BytesIO
-
-import pandas as pd
-import streamlit as st
 import streamlit.components.v1 as components
-from dateutil import parser as dtparser
-from streamlit_autorefresh import st_autorefresh
 
-# PDF (ReportLab)
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm
-
-# ============================================================
-# Scroll persistence helper (Admin tab refresh / autorefresh)
-# ============================================================
 def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
     """
     Persists the page scroll position (window.scrollY) in localStorage and
     restores it after every Streamlit rerun (including st_autorefresh).
-
-    IMPORTANT:
-      - You must CALL preserve_scroll() inside the tab you want it to apply to.
     """
     components.html(
         f"""
@@ -45,7 +18,7 @@ def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
         (function() {{
           const KEY = "{scroll_key}";
 
-          // Install scroll listener only once per browser page load
+          // ⛔ Install scroll listener ONLY ONCE per page load
           if (!window.__refallocScrollInstalled) {{
             window.__refallocScrollInstalled = true;
 
@@ -63,6 +36,7 @@ def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
             }}, {{ passive: true }});
           }}
 
+          // Restore after Streamlit finishes laying out the page
           function restore() {{
             let y = 0;
             try {{
@@ -71,6 +45,7 @@ def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
 
             const maxY = Math.max(0, document.body.scrollHeight - window.innerHeight);
             if (y > maxY) y = maxY;
+
             window.scrollTo(0, y);
           }}
 
@@ -84,6 +59,25 @@ def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
         height=0,
         width=0,
     )
+
+from pathlib import Path
+from datetime import datetime, date, timedelta, timezone
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from io import BytesIO
+
+import pandas as pd
+import streamlit as st
+from dateutil import parser as dtparser
+from streamlit_autorefresh import st_autorefresh
+
+# PDF (ReportLab)
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import mm
 
 
 # ============================================================
@@ -113,14 +107,6 @@ if DEBUG_BANNER:
 # ============================================================
 # Small utilities
 # ============================================================
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _time_12h(dt: datetime) -> str:
-    return dt.strftime("%I:%M %p").lstrip("0")
-
-
 def game_local_date(game_row) -> date:
     """
     Returns the local calendar date for a game row.
@@ -128,6 +114,28 @@ def game_local_date(game_row) -> date:
     """
     dt = dtparser.parse(game_row["start_dt"])
     return dt.date()
+
+
+def referee_has_blackout(ref_id: int, d: date) -> bool:
+    """
+    Returns True if the referee has a blackout on the given date.
+    """
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM blackouts
+        WHERE referee_id=? AND blackout_date=?
+        LIMIT 1
+        """,
+        (ref_id, d.isoformat()),
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def status_badge(text: str, bg: str, fg: str = "white"):
@@ -147,6 +155,10 @@ def status_badge(text: str, bg: str, fg: str = "white"):
         """,
         unsafe_allow_html=True,
     )
+
+
+def _time_12h(dt: datetime) -> str:
+    return dt.strftime("%I:%M %p").lstrip("0")
 
 
 # ============================================================
@@ -177,18 +189,16 @@ def ensure_referees_phone_column():
     finally:
         conn.close()
 
-
 def ensure_ladder_tables():
     """
     Safe migrations for ladder system:
     - teams: team name + division + opening_balance
-    - game_results: one row per game with admin-entered scoring inputs + default flags
+    - game_results: one row per game with admin-entered scoring inputs
     """
     conn = db()
     try:
         cur = conn.cursor()
 
-        # ---- teams ----
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS teams (
@@ -200,106 +210,12 @@ def ensure_ladder_tables():
             """
         )
 
+        # If teams table already existed without opening_balance, add it safely
         cols = conn.execute("PRAGMA table_info(teams);").fetchall()
         col_names = {c["name"] for c in cols}
         if "opening_balance" not in col_names:
-            conn.execute(
-                "ALTER TABLE teams ADD COLUMN opening_balance INTEGER NOT NULL DEFAULT 0;"
-            )
+            conn.execute("ALTER TABLE teams ADD COLUMN opening_balance INTEGER NOT NULL DEFAULT 0;")
 
-        # ---- game_results ----
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS game_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_id INTEGER NOT NULL UNIQUE,
-
-                home_score INTEGER NOT NULL DEFAULT 0,
-                away_score INTEGER NOT NULL DEFAULT 0,
-
-                home_female_tries INTEGER NOT NULL DEFAULT 0,
-                away_female_tries INTEGER NOT NULL DEFAULT 0,
-
-                home_conduct INTEGER NOT NULL DEFAULT 0,
-                away_conduct INTEGER NOT NULL DEFAULT 0,
-
-                home_unstripped INTEGER NOT NULL DEFAULT 0,
-                away_unstripped INTEGER NOT NULL DEFAULT 0,
-
-                home_defaulted INTEGER NOT NULL DEFAULT 0,
-                away_defaulted INTEGER NOT NULL DEFAULT 0,
-
-                updated_at TEXT NOT NULL,
-
-                FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
-            );
-            """
-        )
-
-        cols_gr = conn.execute("PRAGMA table_info(game_results);").fetchall()
-        gr_names = {c["name"] for c in cols_gr}
-        if "home_defaulted" not in gr_names:
-            conn.execute(
-                "ALTER TABLE game_results ADD COLUMN home_defaulted INTEGER NOT NULL DEFAULT 0;"
-            )
-        if "away_defaulted" not in gr_names:
-            conn.execute(
-                "ALTER TABLE game_results ADD COLUMN away_defaulted INTEGER NOT NULL DEFAULT 0;"
-            )
-
-        conn.commit()
-    finally:
-        conn.close()
-
-
-# ============================================================
-# Ladder / scoring helpers
-# (KEEP THIS SINGLE BLOCK — remove all other duplicates)
-# ============================================================
-
-LADDER_WIN_PTS = 3
-LADDER_DRAW_PTS = 2
-LADDER_LOSS_PTS = 0
-
-DIVISIONS = [
-    "Division 1",
-    "Division 2",
-    "Division 3",
-    "Golden Oldies",
-    "Other",
-]
-
-
-def ensure_ladder_tables():
-    """
-    Safe migrations for ladder system:
-    - teams: team name + division + opening_balance
-    - game_results: one row per game with admin-entered scoring inputs (+ default flags)
-    """
-    conn = db()
-    try:
-        cur = conn.cursor()
-
-        # ---- teams table ----
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS teams (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                division TEXT NOT NULL,
-                opening_balance INTEGER NOT NULL DEFAULT 0
-            );
-            """
-        )
-
-        cols = conn.execute("PRAGMA table_info(teams);").fetchall()
-        team_col_names = {c["name"] for c in cols}
-        if "opening_balance" not in team_col_names:
-            conn.execute(
-                "ALTER TABLE teams ADD COLUMN opening_balance INTEGER NOT NULL DEFAULT 0;"
-            )
-
-        # ---- game_results table ----
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS game_results (
@@ -318,9 +234,6 @@ def ensure_ladder_tables():
                 home_unstripped INTEGER NOT NULL DEFAULT 0,
                 away_unstripped INTEGER NOT NULL DEFAULT 0,
 
-                home_defaulted INTEGER NOT NULL DEFAULT 0,
-                away_defaulted INTEGER NOT NULL DEFAULT 0,
-
                 updated_at TEXT NOT NULL,
 
                 FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
@@ -328,648 +241,123 @@ def ensure_ladder_tables():
             """
         )
 
-        # If game_results existed previously, add default columns safely
-        cols = conn.execute("PRAGMA table_info(game_results);").fetchall()
-        gr_col_names = {c["name"] for c in cols}
-        if "home_defaulted" not in gr_col_names:
-            conn.execute(
-                "ALTER TABLE game_results ADD COLUMN home_defaulted INTEGER NOT NULL DEFAULT 0;"
-            )
-        if "away_defaulted" not in gr_col_names:
-            conn.execute(
-                "ALTER TABLE game_results ADD COLUMN away_defaulted INTEGER NOT NULL DEFAULT 0;"
-            )
-
         conn.commit()
     finally:
         conn.close()
 
 
-def upsert_team(name: str, division: str, opening_balance: int = 0):
-    name = (name or "").strip()
-    division = (division or "").strip()
-    if not name or not division:
-        return
 
-    conn = db()
-    try:
-        conn.execute(
-            """
-            INSERT INTO teams(name, division, opening_balance)
-            VALUES (?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-                division=excluded.division,
-                opening_balance=excluded.opening_balance
-            """,
-            (name, division, int(opening_balance)),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def list_teams() -> list[sqlite3.Row]:
-    conn = db()
-    rows = conn.execute(
-        "SELECT id, name, division, opening_balance FROM teams ORDER BY division ASC, name ASC"
-    ).fetchall()
-    conn.close()
-    return rows
-
-
-def get_team_division(name: str) -> str:
-    conn = db()
-    row = conn.execute(
-        "SELECT division FROM teams WHERE name=? LIMIT 1",
-        ((name or "").strip(),),
-    ).fetchone()
-    conn.close()
-    return (row["division"] if row else "").strip()
-
-
-def get_team_opening_balance(name: str) -> int:
-    conn = db()
-    row = conn.execute(
-        "SELECT opening_balance FROM teams WHERE name=? LIMIT 1",
-        ((name or "").strip(),),
-    ).fetchone()
-    conn.close()
-    return int(row["opening_balance"] or 0) if row else 0
-
-
-def get_game_result(game_id: int) -> sqlite3.Row | None:
-    conn = db()
-    row = conn.execute(
-        """
-        SELECT
-            game_id,
-            home_score, away_score,
-            home_female_tries, away_female_tries,
-            home_conduct, away_conduct,
-            home_unstripped, away_unstripped,
-            COALESCE(home_defaulted,0) AS home_defaulted,
-            COALESCE(away_defaulted,0) AS away_defaulted,
-            updated_at
-        FROM game_results
-        WHERE game_id=?
-        LIMIT 1
-        """,
-        (int(game_id),),
-    ).fetchone()
-    conn.close()
-    return row
-
-
-def upsert_game_result(
-    *,
-    game_id: int,
-    home_score: int,
-    away_score: int,
-    home_female_tries: int,
-    away_female_tries: int,
-    home_conduct: int,
-    away_conduct: int,
-    home_unstripped: int,
-    away_unstripped: int,
-    home_defaulted: int = 0,
-    away_defaulted: int = 0,
-):
-    home_defaulted = 1 if int(home_defaulted) else 0
-    away_defaulted = 1 if int(away_defaulted) else 0
-    if home_defaulted and away_defaulted:
-        raise ValueError("Invalid default: both teams cannot be marked as DEFAULTED.")
-
-    conn = db()
-    try:
-        conn.execute(
-            """
-            INSERT INTO game_results(
-                game_id,
-                home_score, away_score,
-                home_female_tries, away_female_tries,
-                home_conduct, away_conduct,
-                home_unstripped, away_unstripped,
-                home_defaulted, away_defaulted,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(game_id) DO UPDATE SET
-                home_score=excluded.home_score,
-                away_score=excluded.away_score,
-                home_female_tries=excluded.home_female_tries,
-                away_female_tries=excluded.away_female_tries,
-                home_conduct=excluded.home_conduct,
-                away_conduct=excluded.away_conduct,
-                home_unstripped=excluded.home_unstripped,
-                away_unstripped=excluded.away_unstripped,
-                home_defaulted=excluded.home_defaulted,
-                away_defaulted=excluded.away_defaulted,
-                updated_at=excluded.updated_at
-            """,
-            (
-                int(game_id),
-                int(home_score), int(away_score),
-                int(home_female_tries), int(away_female_tries),
-                int(home_conduct), int(away_conduct),
-                int(home_unstripped), int(away_unstripped),
-                int(home_defaulted), int(away_defaulted),
-                now_iso(),
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
-    """
-    Per-team per-game audit rows for the selected date.
-    DEFAULT rule:
-      - defaulting team total = 10 (conduct only)
-      - opponent total = 13
-    """
-    start_min = datetime.combine(selected_date, datetime.min.time()).isoformat(timespec="seconds")
-    start_max = datetime.combine(selected_date + timedelta(days=1), datetime.min.time()).isoformat(timespec="seconds")
-
-    conn = db()
-    rows = conn.execute(
-        """
-        WITH base AS (
-            SELECT
-                g.id AS game_id,
-                g.start_dt,
-                g.field_name,
-                g.home_team AS home_team,
-                g.away_team AS away_team,
-                COALESCE(t1.division,'') AS home_division,
-                COALESCE(t2.division,'') AS away_division,
-                COALESCE(gr.home_score,0) AS home_score,
-                COALESCE(gr.away_score,0) AS away_score,
-                COALESCE(gr.home_female_tries,0) AS home_female_tries,
-                COALESCE(gr.away_female_tries,0) AS away_female_tries,
-                COALESCE(gr.home_conduct,0) AS home_conduct,
-                COALESCE(gr.away_conduct,0) AS away_conduct,
-                COALESCE(gr.home_unstripped,0) AS home_unstripped,
-                COALESCE(gr.away_unstripped,0) AS away_unstripped,
-                COALESCE(gr.home_defaulted,0) AS home_defaulted,
-                COALESCE(gr.away_defaulted,0) AS away_defaulted,
-                gr.updated_at
-            FROM games g
-            LEFT JOIN teams t1 ON t1.name = g.home_team
-            LEFT JOIN teams t2 ON t2.name = g.away_team
-            LEFT JOIN game_results gr ON gr.game_id = g.id
-            WHERE g.start_dt >= ? AND g.start_dt < ?
-        ),
-        teamsplit AS (
-            SELECT
-                game_id, start_dt, field_name,
-                home_team AS team,
-                away_team AS opponent,
-                home_division AS division,
-                home_score AS pf,
-                away_score AS pa,
-                home_female_tries AS female_tries,
-                home_conduct AS conduct,
-                home_unstripped AS unstripped,
-                home_defaulted AS defaulted,
-                away_defaulted AS opponent_defaulted,
-                updated_at
-            FROM base
-            UNION ALL
-            SELECT
-                game_id, start_dt, field_name,
-                away_team AS team,
-                home_team AS opponent,
-                away_division AS division,
-                away_score AS pf,
-                home_score AS pa,
-                away_female_tries AS female_tries,
-                away_conduct AS conduct,
-                away_unstripped AS unstripped,
-                away_defaulted AS defaulted,
-                home_defaulted AS opponent_defaulted,
-                updated_at
-            FROM base
-        )
-        SELECT
-            game_id,
-            start_dt,
-            field_name,
-            division,
-            team,
-            opponent,
-            pf,
-            pa,
-            (pf - pa) AS margin,
-
-            CASE
-              WHEN pf > pa THEN 'W'
-              WHEN pf = pa THEN 'D'
-              ELSE 'L'
-            END AS result,
-
-            CASE
-              WHEN pf > pa THEN ?
-              WHEN pf = pa THEN ?
-              ELSE ?
-            END AS match_pts,
-
-            CASE
-              WHEN pf < pa AND (pa - pf) IN (1,2) THEN 1 ELSE 0
-            END AS close_loss_bp,
-
-            female_tries,
-            CASE WHEN female_tries >= 4 THEN 1 ELSE 0 END AS female_bp,
-
-            conduct,
-
-            unstripped,
-            CASE WHEN unstripped >= 3 THEN -2 ELSE 0 END AS unstripped_pen,
-
-            defaulted,
-            opponent_defaulted,
-
-            updated_at
-        FROM teamsplit
-        ORDER BY start_dt ASC, field_name ASC, team ASC
-        """,
-        (start_min, start_max, LADDER_WIN_PTS, LADDER_DRAW_PTS, LADDER_LOSS_PTS),
-    ).fetchall()
-    conn.close()
-
-    out = []
-    for r in rows:
-        match_pts = int(r["match_pts"] or 0)
-        close_bp = int(r["close_loss_bp"] or 0)
-        female_bp = int(r["female_bp"] or 0)
-        conduct = int(r["conduct"] or 0)
-        pen = int(r["unstripped_pen"] or 0)
-
-        defaulted = int(r["defaulted"] or 0)
-        opponent_defaulted = int(r["opponent_defaulted"] or 0)
-
-        if defaulted == 1:
-            # Defaulting team: ONLY 10 conduct points
-            match_pts, close_bp, female_bp, pen = 0, 0, 0, 0
-            conduct = 10
-            result = "L"
-            total = 10
-        elif opponent_defaulted == 1:
-            # Opponent of defaulting team: 13 total automatically
-            match_pts, close_bp, female_bp, pen = 3, 0, 0, 0
-            conduct = 10
-            result = "W"
-            total = 13
-        else:
-            result = r["result"] or "—"
-            total = match_pts + close_bp + female_bp + conduct + pen
-
-        out.append(
-            {
-                "Start": _time_12h(dtparser.parse(r["start_dt"])) if r["start_dt"] else "—",
-                "Field": r["field_name"] or "—",
-                "Division": (r["division"] or "").strip() or "—",
-                "Team": r["team"] or "—",
-                "Opponent": r["opponent"] or "—",
-                "PF": int(r["pf"] or 0),
-                "PA": int(r["pa"] or 0),
-                "Res": result,
-                "Match": match_pts,
-                "CloseBP": close_bp,
-                "FemTries": int(r["female_tries"] or 0),
-                "FemBP": female_bp,
-                "Conduct": conduct,
-                "Unstrip": int(r["unstripped"] or 0),
-                "Pen": pen,
-                "Total": total,
-                "Defaulted": "YES" if defaulted == 1 else ("OPP DEFAULTED" if opponent_defaulted == 1 else ""),
-                "Updated": (r["updated_at"] or "")[:19],
-            }
-        )
-
-    return pd.DataFrame(out)
-
-
-def ladder_table_df_for_date(selected_date: date, division: str) -> pd.DataFrame:
-    """
-    Aggregated ladder for the selected date only.
-    Includes opening_balance.
-    """
-    df = ladder_audit_df_for_date(selected_date)
-    if df.empty:
-        return pd.DataFrame()
-
-    div = (division or "").strip()
-    if div:
-        df = df[df["Division"].fillna("—") == div]
-    if df.empty:
-        return pd.DataFrame()
-
-    grouped = df.groupby("Team", dropna=False).agg(
-        P=("Team", "count"),
-        W=("Res", lambda s: int((s == "W").sum())),
-        D=("Res", lambda s: int((s == "D").sum())),
-        L=("Res", lambda s: int((s == "L").sum())),
-        PF=("PF", "sum"),
-        PA=("PA", "sum"),
-        Match=("Match", "sum"),
-        CloseBP=("CloseBP", "sum"),
-        FemBP=("FemBP", "sum"),
-        Conduct=("Conduct", "sum"),
-        Pen=("Pen", "sum"),
-        Total=("Total", "sum"),
-    ).reset_index()
-
-    grouped["PD"] = grouped["PF"] - grouped["PA"]
-
-    # Opening balance lookup
-    grouped["Opening"] = grouped["Team"].apply(get_team_opening_balance)
-    grouped["Total+Opening"] = grouped["Total"] + grouped["Opening"]
-
-    grouped = grouped.sort_values(
-        by=["Total+Opening", "PD", "PF", "Team"],
-        ascending=[False, False, False, True],
-    ).reset_index(drop=True)
-
-    grouped = grouped[
-        ["Team", "P", "W", "D", "L", "PF", "PA", "PD", "Opening", "Total", "Total+Opening"]
-    ]
-    return grouped
-
-
-def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
-    warnings: list[str] = []
-
-    games = get_games()
-    todays = [g for g in games if game_local_date(g) == selected_date]
-    if not todays:
-        return warnings
-
-    missing_div = set()
-    mismatch_div_games = []
-
-    for g in todays:
-        h = (g["home_team"] or "").strip()
-        a = (g["away_team"] or "").strip()
-        dh = get_team_division(h)
-        da = get_team_division(a)
-
-        if not dh:
-            missing_div.add(h)
-        if not da:
-            missing_div.add(a)
-        if dh and da and dh != da:
-            mismatch_div_games.append(f"{h} vs {a} ({dh} / {da})")
-
-    if missing_div:
-        warnings.append("Missing team division for: " + ", ".join(sorted(missing_div)))
-
-    if mismatch_div_games:
-        warnings.append("Cross-division games detected: " + "; ".join(mismatch_div_games))
-
-    for g in todays:
-        gr = get_game_result(int(g["id"]))
-        if not gr:
-            warnings.append(f"Missing result entry: {g['home_team']} vs {g['away_team']}")
-            continue
-
-        hd = int(gr["home_defaulted"] or 0)
-        ad = int(gr["away_defaulted"] or 0)
-        if hd and ad:
-            warnings.append(f"Invalid default flags (both sides): {g['home_team']} vs {g['away_team']}")
-
-        if not (hd or ad):
-            for side in ("home", "away"):
-                c = int(gr[f"{side}_conduct"] or 0)
-                if c < 0 or c > 10:
-                    warnings.append(
-                        f"Conduct out of range (0-10): {g['home_team']} vs {g['away_team']} ({side}={c})"
-                    )
-
-        for k in [
-            "home_score", "away_score",
-            "home_female_tries", "away_female_tries",
-            "home_unstripped", "away_unstripped",
-        ]:
-            v = int(gr[k] or 0)
-            if v < 0:
-                warnings.append(f"Negative value {k} for game: {g['home_team']} vs {g['away_team']}")
-
-    return warnings
-
-
-def ensure_referees_phone_column():
-    """
-    Safe migration: adds referees.phone if it doesn't exist.
-    """
-    conn = db()
-    try:
-        cols = conn.execute("PRAGMA table_info(referees);").fetchall()
-        col_names = {c["name"] for c in cols}
-        if "phone" not in col_names:
-            conn.execute("ALTER TABLE referees ADD COLUMN phone TEXT;")
-            conn.commit()
-    finally:
-        conn.close()
-
-
-def ensure_ladder_tables():
-    """
-    Safe migrations for ladder system:
-    - teams: team name + division + opening_balance
-    - game_results: one row per game (scores + referee inputs + default flags)
-    """
-    conn = db()
-    try:
-        cur = conn.cursor()
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS teams (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                division TEXT NOT NULL,
-                opening_balance INTEGER NOT NULL DEFAULT 0
-            );
-            """
-        )
-
-        cols = conn.execute("PRAGMA table_info(teams);").fetchall()
-        col_names = {c["name"] for c in cols}
-        if "opening_balance" not in col_names:
-            conn.execute(
-                "ALTER TABLE teams ADD COLUMN opening_balance INTEGER NOT NULL DEFAULT 0;"
-            )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS game_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_id INTEGER NOT NULL UNIQUE,
-
-                home_score INTEGER NOT NULL DEFAULT 0,
-                away_score INTEGER NOT NULL DEFAULT 0,
-
-                home_female_tries INTEGER NOT NULL DEFAULT 0,
-                away_female_tries INTEGER NOT NULL DEFAULT 0,
-
-                home_conduct INTEGER NOT NULL DEFAULT 0,
-                away_conduct INTEGER NOT NULL DEFAULT 0,
-
-                home_unstripped INTEGER NOT NULL DEFAULT 0,
-                away_unstripped INTEGER NOT NULL DEFAULT 0,
-
-                home_defaulted INTEGER NOT NULL DEFAULT 0,
-                away_defaulted INTEGER NOT NULL DEFAULT 0,
-
-                updated_at TEXT NOT NULL,
-
-                FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
-            );
-            """
-        )
-
-        cols_gr = conn.execute("PRAGMA table_info(game_results);").fetchall()
-        gr_names = {c["name"] for c in cols_gr}
-        if "home_defaulted" not in gr_names:
-            conn.execute(
-                "ALTER TABLE game_results ADD COLUMN home_defaulted INTEGER NOT NULL DEFAULT 0;"
-            )
-        if "away_defaulted" not in gr_names:
-            conn.execute(
-                "ALTER TABLE game_results ADD COLUMN away_defaulted INTEGER NOT NULL DEFAULT 0;"
-            )
-
-        conn.commit()
-    finally:
-        conn.close()
-
-
-# ============================================================
-# init_db (KEEP THIS SINGLE VERSION — remove duplicates)
-# ============================================================
 def init_db():
-    """
-    Creates core tables (referees/games/assignments/offers/blackouts/admin auth)
-    then runs safe migrations (phone column + ladder tables).
-
-    This order matters on a fresh DB.
-    """
-    conn = db()
-    try:
-        cur = conn.cursor()
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS referees (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                email TEXT NOT NULL UNIQUE,
-                active INTEGER NOT NULL DEFAULT 1,
-                phone TEXT
-            );
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS games (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_key TEXT NOT NULL UNIQUE,
-                home_team TEXT NOT NULL,
-                away_team TEXT NOT NULL,
-                field_name TEXT NOT NULL,
-                start_dt TEXT NOT NULL
-            );
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS assignments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_id INTEGER NOT NULL,
-                slot_no INTEGER NOT NULL,
-                referee_id INTEGER,
-                status TEXT NOT NULL DEFAULT 'EMPTY',
-                updated_at TEXT NOT NULL,
-                UNIQUE(game_id, slot_no),
-                FOREIGN KEY(game_id) REFERENCES games(id),
-                FOREIGN KEY(referee_id) REFERENCES referees(id)
-            );
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS offers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assignment_id INTEGER NOT NULL,
-                token TEXT NOT NULL UNIQUE,
-                created_at TEXT NOT NULL,
-                responded_at TEXT,
-                response TEXT,
-                FOREIGN KEY(assignment_id) REFERENCES assignments(id)
-            );
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS blackouts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                referee_id INTEGER NOT NULL,
-                blackout_date TEXT NOT NULL,
-                UNIQUE(referee_id, blackout_date),
-                FOREIGN KEY(referee_id) REFERENCES referees(id)
-            );
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS admins (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL UNIQUE,
-                active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
-            );
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS admin_tokens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL,
-                token TEXT NOT NULL UNIQUE,
-                created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                used_at TEXT
-            );
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS admin_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL,
-                token TEXT NOT NULL UNIQUE,
-                created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                revoked_at TEXT
-            );
-            """
-        )
-
-        conn.commit()
-    finally:
-        conn.close()
-
-    # Safe migrations (depend on the tables existing)
     ensure_referees_phone_column()
     ensure_ladder_tables()
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS referees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            active INTEGER NOT NULL DEFAULT 1
+        );
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS games (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_key TEXT NOT NULL UNIQUE,
+            home_team TEXT NOT NULL,
+            away_team TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            start_dt TEXT NOT NULL
+        );
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id INTEGER NOT NULL,
+            slot_no INTEGER NOT NULL,
+            referee_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'EMPTY',
+            updated_at TEXT NOT NULL,
+            UNIQUE(game_id, slot_no),
+            FOREIGN KEY(game_id) REFERENCES games(id),
+            FOREIGN KEY(referee_id) REFERENCES referees(id)
+        );
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS offers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assignment_id INTEGER NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            responded_at TEXT,
+            response TEXT,
+            FOREIGN KEY(assignment_id) REFERENCES assignments(id)
+        );
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS blackouts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referee_id INTEGER NOT NULL,
+            blackout_date TEXT NOT NULL,
+            UNIQUE(referee_id, blackout_date),
+            FOREIGN KEY(referee_id) REFERENCES referees(id)
+        );
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT
+        );
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT
+        );
+        """
+    )
+
+    conn.commit()
+    conn.close()
 
 
 # ============================================================
@@ -1016,45 +404,32 @@ def send_html_email(
     text_body: str | None = None,
 ):
     cfg = smtp_settings()
-
-    # NOTE: APP_BASE_URL isn't required to SEND an email, only to generate links elsewhere.
-    if not (cfg["host"] and cfg["user"] and cfg["password"] and cfg["from_email"]):
+    if not (
+        cfg["host"]
+        and cfg["user"]
+        and cfg["password"]
+        and cfg["from_email"]
+        and cfg["app_base_url"]
+    ):
         raise RuntimeError(
             "Email not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, "
-            "SMTP_FROM_EMAIL, SMTP_FROM_NAME (and APP_BASE_URL for login/offer links)."
+            "SMTP_FROM_EMAIL, SMTP_FROM_NAME, APP_BASE_URL."
         )
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f'{cfg["from_name"]} <{cfg["from_email"]}>'
-    # Avoid putting an email address as a "name" (some providers treat this as spammy)
-    safe_name = (to_name or "").strip()
-    if "@" in safe_name:
-        safe_name = ""
-    msg["To"] = f"{safe_name} <{to_email}>" if safe_name else to_email
+    msg["To"] = f"{to_name} <{to_email}>"
 
     if not text_body:
         text_body = "You have a notification from Referee Allocator."
     msg.attach(MIMEText(text_body, "plain"))
     msg.attach(MIMEText(html_body, "html"))
 
-    port = int(cfg["port"] or 587)
-
-    # Support both STARTTLS (587) and SSL (465)
-    use_ssl = str(os.getenv("SMTP_USE_SSL", "")).lower() in ("1", "true", "yes") or port == 465
-
-    if use_ssl:
-        with smtplib.SMTP_SSL(cfg["host"], port, timeout=20) as server:
-            server.ehlo()
-            server.login(cfg["user"], cfg["password"])
-            server.sendmail(cfg["from_email"], [to_email], msg.as_string())
-    else:
-        with smtplib.SMTP(cfg["host"], port, timeout=20) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(cfg["user"], cfg["password"])
-            server.sendmail(cfg["from_email"], [to_email], msg.as_string())
+    with smtplib.SMTP(cfg["host"], cfg["port"]) as server:
+        server.starttls()
+        server.login(cfg["user"], cfg["password"])
+        server.sendmail(cfg["from_email"], [to_email], msg.as_string())
 
 
 # ============================================================
@@ -1719,23 +1094,58 @@ DIVISIONS = [
 ]
 
 
-def ensure_game_results_default_columns():
+def ensure_ladder_tables():
     """
-    Safe migration: add default columns to game_results if missing.
+    Safe migrations for ladder system:
+    - teams: team name + division + opening_balance
+    - game_results: one row per game with admin-entered scoring inputs
     """
     conn = db()
     try:
-        cols = conn.execute("PRAGMA table_info(game_results);").fetchall()
-        col_names = {c["name"] for c in cols}
+        cur = conn.cursor()
 
-        if "home_defaulted" not in col_names:
-            conn.execute(
-                "ALTER TABLE game_results ADD COLUMN home_defaulted INTEGER NOT NULL DEFAULT 0;"
-            )
-        if "away_defaulted" not in col_names:
-            conn.execute(
-                "ALTER TABLE game_results ADD COLUMN away_defaulted INTEGER NOT NULL DEFAULT 0;"
-            )
+        # New installs: include opening_balance in CREATE TABLE
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS teams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                division TEXT NOT NULL,
+                opening_balance INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+
+        # Existing DBs: add column if missing
+        cols = conn.execute("PRAGMA table_info(teams);").fetchall()
+        col_names = {c["name"] for c in cols}
+        if "opening_balance" not in col_names:
+            conn.execute("ALTER TABLE teams ADD COLUMN opening_balance INTEGER NOT NULL DEFAULT 0;")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS game_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id INTEGER NOT NULL UNIQUE,
+
+                home_score INTEGER NOT NULL DEFAULT 0,
+                away_score INTEGER NOT NULL DEFAULT 0,
+
+                home_female_tries INTEGER NOT NULL DEFAULT 0,
+                away_female_tries INTEGER NOT NULL DEFAULT 0,
+
+                home_conduct INTEGER NOT NULL DEFAULT 0,   -- 0..10
+                away_conduct INTEGER NOT NULL DEFAULT 0,   -- 0..10
+
+                home_unstripped INTEGER NOT NULL DEFAULT 0,
+                away_unstripped INTEGER NOT NULL DEFAULT 0,
+
+                updated_at TEXT NOT NULL,
+
+                FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
+            );
+            """
+        )
 
         conn.commit()
     finally:
@@ -1743,10 +1153,6 @@ def ensure_game_results_default_columns():
 
 
 def upsert_team(name: str, division: str, opening_balance: int = 0):
-    """
-    Insert/update team division + opening_balance (points carried in before this system started).
-    Requires teams.opening_balance column.
-    """
     name = (name or "").strip()
     division = (division or "").strip()
     if not name or not division:
@@ -1773,7 +1179,11 @@ def list_teams() -> list[sqlite3.Row]:
     conn = db()
     rows = conn.execute(
         """
-        SELECT id, name, division, COALESCE(opening_balance,0) AS opening_balance
+        SELECT
+            id,
+            name,
+            division,
+            COALESCE(opening_balance,0) AS opening_balance
         FROM teams
         ORDER BY division ASC, name ASC
         """
@@ -1792,16 +1202,6 @@ def get_team_division(name: str) -> str:
     return (row["division"] if row else "").strip()
 
 
-def get_team_opening_balance(name: str) -> int:
-    conn = db()
-    row = conn.execute(
-        "SELECT COALESCE(opening_balance,0) AS opening_balance FROM teams WHERE name=? LIMIT 1",
-        ((name or "").strip(),),
-    ).fetchone()
-    conn.close()
-    return int(row["opening_balance"] or 0) if row else 0
-
-
 def get_game_result(game_id: int) -> sqlite3.Row | None:
     conn = db()
     row = conn.execute(
@@ -1812,8 +1212,6 @@ def get_game_result(game_id: int) -> sqlite3.Row | None:
             home_female_tries, away_female_tries,
             home_conduct, away_conduct,
             home_unstripped, away_unstripped,
-            COALESCE(home_defaulted,0) AS home_defaulted,
-            COALESCE(away_defaulted,0) AS away_defaulted,
             updated_at
         FROM game_results
         WHERE game_id=?
@@ -1836,14 +1234,7 @@ def upsert_game_result(
     away_conduct: int,
     home_unstripped: int,
     away_unstripped: int,
-    home_defaulted: int = 0,
-    away_defaulted: int = 0,
 ):
-    home_defaulted = 1 if int(home_defaulted) else 0
-    away_defaulted = 1 if int(away_defaulted) else 0
-    if home_defaulted and away_defaulted:
-        raise ValueError("Invalid default: both teams cannot be marked as DEFAULTED.")
-
     conn = db()
     try:
         conn.execute(
@@ -1854,10 +1245,9 @@ def upsert_game_result(
                 home_female_tries, away_female_tries,
                 home_conduct, away_conduct,
                 home_unstripped, away_unstripped,
-                home_defaulted, away_defaulted,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(game_id) DO UPDATE SET
                 home_score=excluded.home_score,
                 away_score=excluded.away_score,
@@ -1867,8 +1257,6 @@ def upsert_game_result(
                 away_conduct=excluded.away_conduct,
                 home_unstripped=excluded.home_unstripped,
                 away_unstripped=excluded.away_unstripped,
-                home_defaulted=excluded.home_defaulted,
-                away_defaulted=excluded.away_defaulted,
                 updated_at=excluded.updated_at
             """,
             (
@@ -1877,7 +1265,6 @@ def upsert_game_result(
                 int(home_female_tries), int(away_female_tries),
                 int(home_conduct), int(away_conduct),
                 int(home_unstripped), int(away_unstripped),
-                int(home_defaulted), int(away_defaulted),
                 now_iso(),
             ),
         )
@@ -1888,11 +1275,8 @@ def upsert_game_result(
 
 def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
     """
-    Per-team per-game scoring for fault finding (selected date only).
-
-    DEFAULT rules:
-      - Defaulting team total = 10 (conduct only)
-      - Opponent total = 13 (3 match pts + 10 conduct)
+    Returns per-team per-game computed scoring, plus inputs, for fault finding.
+    Only games on selected_date.
     """
     start_min = datetime.combine(selected_date, datetime.min.time()).isoformat(timespec="seconds")
     start_max = datetime.combine(selected_date + timedelta(days=1), datetime.min.time()).isoformat(timespec="seconds")
@@ -1905,16 +1289,20 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 g.id AS game_id,
                 g.start_dt,
                 g.field_name,
+
                 g.home_team AS home_team,
                 g.away_team AS away_team,
+
                 COALESCE(t1.division,'') AS home_division,
                 COALESCE(t2.division,'') AS away_division,
+
+                COALESCE(t1.opening_balance,0) AS home_opening,
+                COALESCE(t2.opening_balance,0) AS away_opening,
+
                 gr.home_score, gr.away_score,
                 gr.home_female_tries, gr.away_female_tries,
                 gr.home_conduct, gr.away_conduct,
                 gr.home_unstripped, gr.away_unstripped,
-                COALESCE(gr.home_defaulted,0) AS home_defaulted,
-                COALESCE(gr.away_defaulted,0) AS away_defaulted,
                 gr.updated_at
             FROM games g
             LEFT JOIN teams t1 ON t1.name = g.home_team
@@ -1928,13 +1316,15 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 home_team AS team,
                 away_team AS opponent,
                 home_division AS division,
+                home_opening AS opening_balance,
+
                 home_score AS pf,
                 away_score AS pa,
+
                 home_female_tries AS female_tries,
                 home_conduct AS conduct,
                 home_unstripped AS unstripped,
-                home_defaulted AS defaulted,
-                away_defaulted AS opponent_defaulted,
+
                 updated_at
             FROM base
 
@@ -1945,13 +1335,15 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 away_team AS team,
                 home_team AS opponent,
                 away_division AS division,
+                away_opening AS opening_balance,
+
                 away_score AS pf,
                 home_score AS pa,
+
                 away_female_tries AS female_tries,
                 away_conduct AS conduct,
                 away_unstripped AS unstripped,
-                away_defaulted AS defaulted,
-                home_defaulted AS opponent_defaulted,
+
                 updated_at
             FROM base
         )
@@ -1962,6 +1354,7 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
             division,
             team,
             opponent,
+            opening_balance,
             pf,
             pa,
             (pf - pa) AS margin,
@@ -1990,9 +1383,6 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
             unstripped,
             CASE WHEN unstripped >= 3 THEN -2 ELSE 0 END AS unstripped_pen,
 
-            defaulted,
-            opponent_defaulted,
-
             updated_at
         FROM teamsplit
         ORDER BY start_dt ASC, field_name ASC, team ASC
@@ -2009,28 +1399,7 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
         conduct = int(r["conduct"] or 0)
         pen = int(r["unstripped_pen"] or 0)
 
-        defaulted = int(r["defaulted"] or 0)
-        opponent_defaulted = int(r["opponent_defaulted"] or 0)
-
-        if defaulted == 1:
-            match_pts = 0
-            close_bp = 0
-            female_bp = 0
-            pen = 0
-            conduct = 10
-            result = "L"
-            total = 10
-        elif opponent_defaulted == 1:
-            match_pts = 3
-            close_bp = 0
-            female_bp = 0
-            pen = 0
-            conduct = 10
-            result = "W"
-            total = 13
-        else:
-            result = r["result"] or "—"
-            total = match_pts + close_bp + female_bp + conduct + pen
+        total = match_pts + close_bp + female_bp + conduct + pen
 
         out.append(
             {
@@ -2039,9 +1408,10 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 "Division": (r["division"] or "").strip() or "—",
                 "Team": r["team"] or "—",
                 "Opponent": r["opponent"] or "—",
+                "Opening": int(r["opening_balance"] or 0),
                 "PF": int(r["pf"] or 0),
                 "PA": int(r["pa"] or 0),
-                "Res": result,
+                "Res": r["result"] or "—",
                 "Match": match_pts,
                 "CloseBP": close_bp,
                 "FemTries": int(r["female_tries"] or 0),
@@ -2049,8 +1419,7 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 "Conduct": conduct,
                 "Unstrip": int(r["unstripped"] or 0),
                 "Pen": pen,
-                "Total": total,
-                "Defaulted": "YES" if defaulted == 1 else ("OPP DEFAULTED" if opponent_defaulted == 1 else ""),
+                "Points": total,
                 "Updated": (r["updated_at"] or "")[:19],
             }
         )
@@ -2060,17 +1429,16 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
 
 def ladder_table_df_for_date(selected_date: date, division: str) -> pd.DataFrame:
     """
-    Aggregated ladder for selected date, includes Opening + Final.
+    Aggregated ladder for the selected date only (plus Opening Balance).
     """
     df = ladder_audit_df_for_date(selected_date)
     if df.empty:
         return pd.DataFrame()
 
-    df = df[df["Division"].fillna("—") == (division or "—")]
+    div_label = (division or "—").strip() or "—"
+    df = df[df["Division"].fillna("—") == div_label]
     if df.empty:
         return pd.DataFrame()
-
-    opening_map = {t["name"]: int(t["opening_balance"] or 0) for t in list_teams()}
 
     grouped = df.groupby("Team", dropna=False).agg(
         P=("Team", "count"),
@@ -2079,35 +1447,33 @@ def ladder_table_df_for_date(selected_date: date, division: str) -> pd.DataFrame
         L=("Res", lambda s: int((s == "L").sum())),
         PF=("PF", "sum"),
         PA=("PA", "sum"),
+        Opening=("Opening", "max"),  # should be constant per team; max is safe
         Match=("Match", "sum"),
         CloseBP=("CloseBP", "sum"),
         FemBP=("FemBP", "sum"),
         Conduct=("Conduct", "sum"),
         Pen=("Pen", "sum"),
-        Total=("Total", "sum"),
+        Points=("Points", "sum"),
     ).reset_index()
 
     grouped["PD"] = grouped["PF"] - grouped["PA"]
-    grouped["Opening"] = grouped["Team"].apply(lambda t: int(opening_map.get((t or "").strip(), 0)))
-    grouped["Final"] = grouped["Opening"] + grouped["Total"]
+    grouped["Total"] = grouped["Opening"] + grouped["Points"]
 
     grouped = grouped.sort_values(
-        by=["Final", "PD", "PF", "Team"],
+        by=["Total", "PD", "PF", "Team"],
         ascending=[False, False, False, True],
     ).reset_index(drop=True)
 
-    return grouped[
-        [
-            "Team", "P", "W", "D", "L",
-            "PF", "PA", "PD",
-            "Opening",
-            "Match", "CloseBP", "FemBP", "Conduct", "Pen",
-            "Total", "Final",
-        ]
+    grouped = grouped[
+        ["Team", "P", "W", "D", "L", "PF", "PA", "PD", "Opening", "Match", "CloseBP", "FemBP", "Conduct", "Pen", "Points", "Total"]
     ]
+    return grouped
 
 
 def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
+    """
+    Collects human-friendly warnings to help admins fault-find quickly.
+    """
     warnings: list[str] = []
 
     games = get_games()
@@ -2115,8 +1481,9 @@ def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
     if not todays:
         return warnings
 
+    # Team division coverage + opening balance awareness
     missing_div = set()
-    mismatch_div_games = []
+    cross_div_games = []
 
     for g in todays:
         h = (g["home_team"] or "").strip()
@@ -2129,37 +1496,35 @@ def ladder_validation_warnings_for_date(selected_date: date) -> list[str]:
         if not da:
             missing_div.add(a)
         if dh and da and dh != da:
-            mismatch_div_games.append(f"{h} vs {a} ({dh} / {da})")
+            cross_div_games.append(f"{h} vs {a} ({dh} / {da})")
 
     if missing_div:
         warnings.append("Missing team division for: " + ", ".join(sorted(missing_div)))
 
-    if mismatch_div_games:
-        warnings.append("Cross-division games detected: " + "; ".join(mismatch_div_games))
+    if cross_div_games:
+        warnings.append("Cross-division games detected: " + "; ".join(cross_div_games))
 
+    # Results completeness + sanity checks
     for g in todays:
         gr = get_game_result(int(g["id"]))
         if not gr:
             warnings.append(f"Missing result entry: {g['home_team']} vs {g['away_team']}")
             continue
 
-        hd = int(gr["home_defaulted"] or 0)
-        ad = int(gr["away_defaulted"] or 0)
-        if hd and ad:
-            warnings.append(f"Invalid default flags (both sides): {g['home_team']} vs {g['away_team']}")
-
-        if not (hd or ad):
-            for side in ("home", "away"):
-                c = int(gr[f"{side}_conduct"] or 0)
-                if c < 0 or c > 10:
-                    warnings.append(
-                        f"Conduct out of range (0-10): {g['home_team']} vs {g['away_team']} ({side}={c})"
-                    )
+        for side in ("home", "away"):
+            c = int(gr[f"{side}_conduct"] or 0)
+            if c < 0 or c > 10:
+                warnings.append(
+                    f"Conduct out of range (0-10): {g['home_team']} vs {g['away_team']} ({side}={c})"
+                )
 
         for k in [
-            "home_score", "away_score",
-            "home_female_tries", "away_female_tries",
-            "home_unstripped", "away_unstripped",
+            "home_score",
+            "away_score",
+            "home_female_tries",
+            "away_female_tries",
+            "home_unstripped",
+            "away_unstripped",
         ]:
             v = int(gr[k] or 0)
             if v < 0:
@@ -2440,55 +1805,6 @@ def build_admin_summary_pdf_bytes(selected_date: date) -> bytes:
 
     doc.build(story)
     return buffer.getvalue()
-
-
-def build_admin_summary_xlsx_bytes(selected_date: date) -> bytes:
-    """
-    Builds an .xlsx version of the SAME summary as the PDF.
-    One row per game, with refs in Slot 1 / Slot 2.
-    """
-    games = get_admin_print_rows_for_date(selected_date)
-
-    rows = []
-    for g in games:
-        dt = dtparser.parse(g["start_dt"])
-        start_12h = dt.strftime("%I:%M %p").lstrip("0")
-
-        r1 = _format_ref_name(g["slots"][1]["name"], g["slots"][1]["status"])
-        r2 = _format_ref_name(g["slots"][2]["name"], g["slots"][2]["status"])
-
-        rows.append(
-            {
-                "Start": start_12h,
-                "Field": g["field_name"],
-                "Teams": f"{g['home_team']} vs {g['away_team']}",
-                "Ref 1": r1 if r1 != "—" else "",
-                "Ref 2": r2 if r2 != "—" else "",
-            }
-        )
-
-    df = pd.DataFrame(rows)
-
-    # Sort by start time then field then teams
-    if not df.empty:
-        df = df.sort_values(by=["Start", "Field", "Teams"], ascending=[True, True, True]).reset_index(drop=True)
-
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        sheet = "Summary"
-        df.to_excel(writer, index=False, sheet_name=sheet)
-
-        # Basic formatting (safe, minimal)
-        ws = writer.sheets[sheet]
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-
-        # Column widths (approx)
-        widths = {"A": 12, "B": 12, "C": 40, "D": 22, "E": 22}
-        for col, w in widths.items():
-            ws.column_dimensions[col].width = w
-
-    return output.getvalue()
 
 
 def _refs_names_only_for_game(g: dict) -> str:
@@ -3014,18 +2330,10 @@ if not st.session_state.get("admin_email"):
             st.error("That email is not an authorised administrator.")
         else:
             try:
-                login_url = send_admin_login_email(email)
-
-                st.success("Login link generated.")
-                st.info("If the email doesn’t arrive, use this link directly:")
-
-                st.code(login_url)
-
-                # Optional convenience button
-                st.markdown(f"[Open login link]({login_url})")
-
+                send_admin_login_email(email)
+                st.success("Login link sent. Check your email.")
             except Exception as e:
-                st.error(f"Failed to send login link: {e}")
+                st.error(str(e))
 
     st.stop()
 
@@ -3034,17 +2342,12 @@ admin_logout_button()
 
 tabs = st.tabs(["Admin", "Ladder", "Import", "Blackouts", "Administrators"])
 
-
 # ============================================================
 # Admin tab
 # ============================================================
 with tabs[0]:
-    # Keep scroll position stable across reruns/autorefresh
-    preserve_scroll("refalloc_admin_scroll")
-
     st.subheader("Games & Assignments")
 
-    # --- Auto refresh ---
     auto = st.toggle("Auto-refresh every 5 seconds", value=True, key="auto_refresh_toggle")
     if auto:
         st_autorefresh(interval=5000, key="auto_refresh_tick")
@@ -3052,7 +2355,6 @@ with tabs[0]:
     if st.button("Refresh status", key="refresh_status_btn"):
         st.rerun()
 
-    # --- Load data ---
     games = get_games()
     refs = get_referees()
 
@@ -3060,7 +2362,6 @@ with tabs[0]:
         st.info("Import a Games CSV first (Import tab).")
         st.stop()
 
-    # --- Date selector ---
     all_dates = sorted({game_local_date(g) for g in games})
     today = date.today()
     default_idx = 0
@@ -3076,357 +2377,328 @@ with tabs[0]:
         key="games_date_select",
     )
 
-    todays_games = [g for g in games if game_local_date(g) == selected_date]
-    st.caption(f"{len(todays_games)} game(s) on {selected_date.isoformat()}")
+    preserve_scroll(f"refalloc_admin_games_tab_{selected_date.isoformat()}")
 
-    # ========================================================
-    # Printable Summary (PDF + XLSX + Scorecards PDF)
-    # ========================================================
-    st.markdown("---")
-    st.subheader("Printable Summary")
+    count_games = sum(1 for g in games if game_local_date(g) == selected_date)
+    st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
 
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    week_start, week_end_excl = iso_week_window(selected_date)
 
-    with c1:
-        if st.button("Build PDF", key="build_pdf_btn"):
-            try:
-                st.session_state["admin_summary_pdf_bytes"] = build_admin_summary_pdf_bytes(selected_date)
-                st.success("PDF built.")
-            except Exception as e:
-                st.error(f"Failed to build PDF: {e}")
+    main_col, side_col = st.columns([3, 1], gap="large")
 
-    with c2:
-        if st.button("Build XLSX", key="build_xlsx_btn"):
-            try:
-                st.session_state["admin_summary_xlsx_bytes"] = build_admin_summary_xlsx_bytes(selected_date)
-                st.success("XLSX built.")
-            except Exception as e:
-                st.error(f"Failed to build XLSX: {e}")
+    with side_col:
+        st.markdown("### Referee workload")
+        st.caption("All-time accepted/assigned (all games)")
+        df_work = get_referee_workload_all_time()
 
-    with c3:
-        if st.button("Build Scorecards", key="build_scorecards_btn"):
-            try:
-                st.session_state["ref_scorecards_pdf_bytes"] = build_referee_scorecards_pdf_bytes(selected_date)
-                st.success("Scorecards PDF built.")
-            except Exception as e:
-                st.error(f"Failed to build scorecards: {e}")
+        if df_work.empty:
+            st.info("No referees found.")
+        else:
+            st.dataframe(df_work, use_container_width=True, hide_index=True)
+            total_acc = int(df_work["Accepted"].sum()) if "Accepted" in df_work.columns else 0
+            st.caption(f"Total accepted/assigned slots (all-time): {total_acc}")
 
-    with c4:
-        pdf_bytes = st.session_state.get("admin_summary_pdf_bytes")
-        xlsx_bytes = st.session_state.get("admin_summary_xlsx_bytes")
-        score_bytes = st.session_state.get("ref_scorecards_pdf_bytes")
+    with main_col:
+        accepted_slots, total_slots = get_acceptance_progress_for_window(week_start, week_end_excl)
 
-        d1, d2, d3 = st.columns(3)
+        pct = (accepted_slots / total_slots) if total_slots else 0.0
+        pct_clamped = max(0.0, min(1.0, pct))
 
-        with d1:
+        if total_slots == 0:
+            bar_color = "#9e9e9e"
+        elif pct_clamped < 0.50:
+            bar_color = "#c62828"
+        elif pct_clamped < 0.90:
+            bar_color = "#ffb300"
+        else:
+            bar_color = "#2e7d32"
+
+        not_accepted_names = list_referees_not_accepted_for_window(week_start, week_end_excl)
+
+        c_bar, c_list = st.columns([1, 2], vertical_alignment="center")
+
+        with c_bar:
+            height_px = 24
+            st.markdown(
+                f"""
+                <div style="font-size:12px; color:#666; margin-bottom:6px;">
+                  <b>Week acceptance (ISO)</b> — {accepted_slots}/{total_slots}
+                </div>
+
+                <div style="width:100%; background:#e0e0e0; border-radius:{height_px}px; height:{height_px}px; overflow:hidden;">
+                  <div style="width:{pct_clamped*100:.1f}%; background:{bar_color}; height:{height_px}px;"></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with c_list:
+            has_offers = has_any_offers_for_window(week_start, week_end_excl)
+
+            if not has_offers:
+                st.caption("")
+            else:
+                st.markdown(
+                    "<div style='font-size:12px; color:#666; margin-bottom:6px;'><b>Yet to ACCEPT (unique)</b></div>",
+                    unsafe_allow_html=True,
+                )
+
+                if not not_accepted_names:
+                    st.markdown(
+                        "<div style='font-size:12px; color:#2e7d32;'>All accepted ✅</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    items_html = ", ".join([f"<span>{n}</span>" for n in not_accepted_names])
+                    st.markdown(
+                        f"""
+                        <div style="
+                            font-size:12px;
+                            color:#ffb300;
+                            line-height:1.6;
+                            display:flex;
+                            flex-wrap:wrap;
+                            gap:6px;
+                            align-items:center;
+                        ">
+                          {items_html}
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+        st.markdown("---")
+        st.subheader("Printable Summary")
+
+        c_pdf1, c_pdf2, c_pdf3, c_pdf4 = st.columns([1, 2, 1, 2])
+
+        with c_pdf1:
+            if st.button("Build Summary PDF", key="build_pdf_btn"):
+                try:
+                    pdf_bytes = build_admin_summary_pdf_bytes(selected_date)
+                    st.session_state["admin_summary_pdf_bytes"] = pdf_bytes
+                    st.success("Summary PDF built.")
+                except Exception as e:
+                    st.error(f"Failed to build Summary PDF: {e}")
+
+        with c_pdf2:
+            pdf_bytes = st.session_state.get("admin_summary_pdf_bytes")
             if pdf_bytes:
+                filename = f"game_summary_{selected_date.isoformat()}.pdf"
                 st.download_button(
-                    label="Download PDF",
+                    label="Download Summary PDF",
                     data=pdf_bytes,
-                    file_name=f"game_summary_{selected_date.isoformat()}.pdf",
+                    file_name=filename,
                     mime="application/pdf",
                     key="download_pdf_btn",
                 )
             else:
-                st.caption("Build PDF first.")
+                st.caption("Click **Build Summary PDF** to generate the printable schedule.")
 
-        with d2:
-            if xlsx_bytes:
-                st.download_button(
-                    label="Download XLSX",
-                    data=xlsx_bytes,
-                    file_name=f"game_summary_{selected_date.isoformat()}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_xlsx_btn",
-                )
-            else:
-                st.caption("Build XLSX first.")
+        with c_pdf3:
+            if st.button("Build Referee Scorecards", key="build_scorecards_btn"):
+                try:
+                    pdf_bytes = build_referee_scorecards_pdf_bytes(selected_date)
+                    st.session_state["ref_scorecards_pdf_bytes"] = pdf_bytes
+                    st.success("Scorecards PDF built.")
+                except Exception as e:
+                    st.error(f"Failed to build Scorecards PDF: {e}")
 
-        with d3:
-            if score_bytes:
+        with c_pdf4:
+            pdf_bytes = st.session_state.get("ref_scorecards_pdf_bytes")
+            if pdf_bytes:
+                filename = f"referee_scorecards_{selected_date.isoformat()}.pdf"
                 st.download_button(
-                    label="Download Scorecards",
-                    data=score_bytes,
-                    file_name=f"referee_scorecards_{selected_date.isoformat()}.pdf",
+                    label="Download Scorecards PDF",
+                    data=pdf_bytes,
+                    file_name=filename,
                     mime="application/pdf",
                     key="download_scorecards_btn",
                 )
             else:
-                st.caption("Build scorecards first.")
+                st.caption("Click **Build Referee Scorecards** to generate the 6-up scorecards.")
 
-
-    # ========================================================
-    # Games & Assignments (RESTORED)
-    # ========================================================
-    st.markdown("---")
-
-    if not todays_games:
-        st.info("No games found for this date.")
-        st.stop()
-
-    # Referee options
-    ref_options = ["— (unassigned)"] + [f"{r['name']} ({r['email']})" for r in refs]
-    ref_lookup = {f"{r['name']} ({r['email']})": int(r["id"]) for r in refs}
-
-    for g in todays_games:
-        start_dt = dtparser.parse(g["start_dt"])
-        header = f"{g['home_team']} vs {g['away_team']} — {g['field_name']} @ {_time_12h(start_dt)}"
-
-        with st.container(border=True):
-            st.markdown(f"**{header}**")
-
-            assigns = get_assignments_for_game(int(g["id"]))
-            if not assigns:
-                st.caption("No assignment slots found for this game.")
+        for g in games:
+            if game_local_date(g) != selected_date:
                 continue
 
-            slot_cols = st.columns(len(assigns))
+            start_dt = dtparser.parse(g["start_dt"])
+            gdate = game_local_date(g)
 
-            for idx, a in enumerate(assigns):
-                with slot_cols[idx]:
-                    st.markdown(f"**Slot {a['slot_no']}**")
+            ref_options = ["— Select referee —"]
+            ref_lookup = {}
+            for r in refs:
+                label = f"{r['name']} ({r['email']})"
+                if referee_has_blackout(r["id"], gdate):
+                    label = f"🚫 {label} — blackout"
+                ref_options.append(label)
+                ref_lookup[label] = r["id"]
 
-                    # Status badge
-                    stt = (a["status"] or "EMPTY").strip().upper()
-                    if stt in ("ACCEPTED", "ASSIGNED"):
-                        status_badge(stt, "#2e7d32")
-                    elif stt == "DECLINED":
-                        status_badge(stt, "#c62828")
-                    elif stt == "OFFERED":
-                        status_badge(stt, "#1565c0")
-                    elif stt == "NOT_OFFERED":
-                        status_badge("NOT OFFERED", "#6d4c41")
-                    else:
-                        status_badge("EMPTY", "#616161")
-
-                                        # Current referee label for the referee picker
-                    current_label = "— (unassigned)"
-                    if a["referee_id"]:
-                        nm = (a["ref_name"] or "").strip()
-                        em = (a["ref_email"] or "").strip()
-                        if nm and em:
-                            current_label = f"{nm} ({em})"
-
-                    # Referee picker (this is the big dropdown you already see)
-                    pick = st.selectbox(
-                        "Referee",
-                        options=ref_options,
-                        index=ref_options.index(current_label) if current_label in ref_options else 0,
-                        key=f"refpick_{g['id']}_{a['id']}",
-                        label_visibility="collapsed",
-                    )
-
-                    # Action dropdown (THIS is what you’re missing)
-                    # Options depend on whether a referee is selected + current status
-                    stt = (a["status"] or "EMPTY").strip().upper()
-                    has_ref_selected = pick != "— (unassigned)"
-
-                    action_options = ["—"]
-                    if has_ref_selected:
-                        action_options += ["ASSIGN", "OFFER"]
-                    if a["referee_id"]:
-                        action_options += ["CLEAR"]
-
-                    # (Optional) if you want a manual way to mark as ASSIGNED without emailing:
-                    # if a["referee_id"]:
-                    #     action_options += ["MARK ASSIGNED"]
-
-                    action = st.selectbox(
-                        "Action",
-                        options=action_options,
-                        index=0,
-                        key=f"slot_action_{a['id']}",
-                        label_visibility="collapsed",
-                    )
-
-                    if st.button("Apply", key=f"slot_apply_{a['id']}"):
-                        if action == "—":
-                            st.info("Choose an action first.")
-                        elif action == "CLEAR":
-                            clear_assignment(int(a["id"]))
-                            st.rerun()
-                        elif action == "ASSIGN":
-                            if not has_ref_selected:
-                                st.error("Select a referee first.")
-                            else:
-                                new_ref_id = ref_lookup.get(pick)
-                                if not new_ref_id:
-                                    st.error("Invalid referee selection.")
-                                else:
-                                    set_assignment_ref(int(a["id"]), int(new_ref_id))
-                                    st.rerun()
-                        elif action == "OFFER":
-                            if not has_ref_selected:
-                                st.error("Select a referee first.")
-                            else:
-                                # Ensure the assignment row matches the selected pick before offering
-                                new_ref_id = ref_lookup.get(pick)
-                                if not new_ref_id:
-                                    st.error("Invalid referee selection.")
-                                else:
-                                    # If pick differs from DB, set it first
-                                    if int(a["referee_id"] or 0) != int(new_ref_id):
-                                        set_assignment_ref(int(a["id"]), int(new_ref_id))
-
-                                    live = get_assignment_live(int(a["id"]))
-                                    msg_key = f"offer_msg_{a['id']}"
-                                    if not live or not live["referee_id"]:
-                                        st.error("Select a referee first.")
-                                    else:
-                                        send_offer_email_and_mark_offered(
-                                            assignment_id=int(live["id"]),
-                                            referee_name=live["ref_name"] or "Referee",
-                                            referee_email=live["ref_email"] or "",
-                                            game=g,
-                                            start_dt=dtparser.parse(g["start_dt"]),
-                                            msg_key=msg_key,
-                                        )
-                                        if st.session_state.get(msg_key):
-                                            st.caption(st.session_state[msg_key])
-                                    st.rerun()
-
-                    st.caption(" ")
-
-
-# ========================================================
-# Games & Assignments (Actions dropdown restored)
-# ========================================================
-st.markdown("---")
-
-if not todays_games:
-    st.info("No games found for this date.")
-    st.stop()
-
-# Referee options
-ref_options = ["— (unassigned)"] + [f"{r['name']} ({r['email']})" for r in refs]
-ref_lookup = {f"{r['name']} ({r['email']})": int(r["id"]) for r in refs}
-
-ACTION_OPTIONS = [
-    "—",
-    "ASSIGN (set status ASSIGNED)",
-    "OFFER (email offer + set status OFFERED)",
-    "CLEAR (remove referee + delete offers)",
-]
-
-for g in todays_games:
-    start_dt = dtparser.parse(g["start_dt"])
-    header = f"{g['home_team']} vs {g['away_team']} — {g['field_name']} @ {_time_12h(start_dt)}"
-
-    with st.container(border=True):
-        st.markdown(f"**{header}**")
-
-        assigns = get_assignments_for_game(int(g["id"]))
-        if not assigns:
-            st.caption("No assignment slots found for this game.")
-            continue
-
-        slot_cols = st.columns(len(assigns), gap="large")
-
-        for idx, a in enumerate(assigns):
-            with slot_cols[idx]:
-                st.markdown(f"**Slot {a['slot_no']}**")
-
-                # Status badge
-                stt = (a["status"] or "EMPTY").strip().upper()
-                if stt == "ASSIGNED":
-                    status_badge("ASSIGNED", "#2e7d32")
-                elif stt == "ACCEPTED":
-                    status_badge("ACCEPTED", "#1565c0")
-                elif stt == "DECLINED":
-                    status_badge("DECLINED", "#c62828")
-                elif stt == "OFFERED":
-                    status_badge("OFFERED", "#6d4c41")
-                elif stt == "NOT_OFFERED":
-                    status_badge("NOT OFFERED", "#616161")
-                else:
-                    status_badge("EMPTY", "#9e9e9e")
-
-                # Current referee label
-                current_label = "— (unassigned)"
-                if a["referee_id"]:
-                    nm = (a["ref_name"] or "").strip()
-                    em = (a["ref_email"] or "").strip()
-                    if nm and em:
-                        current_label = f"{nm} ({em})"
-
-                pick_key = f"refpick_{g['id']}_{a['id']}"
-                pick = st.selectbox(
-                    "Referee",
-                    options=ref_options,
-                    index=ref_options.index(current_label) if current_label in ref_options else 0,
-                    key=pick_key,
-                    label_visibility="collapsed",
+            with st.container(border=True):
+                st.markdown(
+                    f"**{g['home_team']} vs {g['away_team']}**  \n"
+                    f"Field: **{g['field_name']}**  \n"
+                    f"Start: **{start_dt.strftime('%Y-%m-%d %I:%M %p').lstrip('0')}**"
                 )
 
-                # Action dropdown (this is what you said you lost)
-                act_key = f"action_{g['id']}_{a['id']}"
-                action = st.selectbox(
-                    "Action",
-                    options=ACTION_OPTIONS,
-                    index=0,
-                    key=act_key,
-                    label_visibility="collapsed",
-                )
+                assigns = get_assignments_for_game(g["id"])
+                cols = st.columns(2)
 
-                run_key = f"run_{g['id']}_{a['id']}"
-                if st.button("Run", key=run_key):
-                    # Re-read latest row at click time (avoids stale UI data)
-                    live = get_assignment_live(int(a["id"]))
-                    if not live:
-                        st.error("Assignment not found.")
-                        st.rerun()
+                for col_idx, a in enumerate(assigns):
+                    with cols[col_idx]:
+                        st.markdown(f"#### Slot {a['slot_no']}")
 
-                    # Apply referee selection change first
-                    if pick == "— (unassigned)":
-                        # If user unassigned the ref, treat as CLEAR
-                        clear_assignment(int(live["id"]))
-                        st.rerun()
-                    else:
-                        new_ref_id = ref_lookup.get(pick)
-                        if new_ref_id and int(live["referee_id"] or 0) != int(new_ref_id):
-                            set_assignment_ref(int(live["id"]), int(new_ref_id))
-                            live = get_assignment_live(int(live["id"]))  # refresh
+                        status = (a["status"] or "").strip().upper()
+                        st.caption(f"assignment_id={a['id']} | status={status} | updated_at={a['updated_at']}")
 
-                    # Now perform selected action
-                    if action == "—":
-                        st.info("No action selected.")
-                        st.rerun()
+                        current_ref_label = None
+                        if a["referee_id"] is not None and a["ref_name"] and a["ref_email"]:
+                            current_ref_label = f"{a['ref_name']} ({a['ref_email']})"
+                            if referee_has_blackout(a["referee_id"], gdate):
+                                current_ref_label = f"🚫 {current_ref_label} — blackout"
 
-                    if action.startswith("CLEAR"):
-                        clear_assignment(int(live["id"]))
-                        st.rerun()
+                        default_index = 0
+                        if current_ref_label and current_ref_label in ref_options:
+                            default_index = ref_options.index(current_ref_label)
 
-                    if not live["referee_id"]:
-                        st.error("Select a referee first.")
-                        st.rerun()
-
-                    if action.startswith("ASSIGN"):
-                        set_assignment_status(int(live["id"]), "ASSIGNED")
-                        st.rerun()
-
-                    if action.startswith("OFFER"):
-                        msg_key = f"offer_msg_{live['id']}"
-                        send_offer_email_and_mark_offered(
-                            assignment_id=int(live["id"]),
-                            referee_name=live["ref_name"] or "Referee",
-                            referee_email=live["ref_email"] or "",
-                            game=g,
-                            start_dt=dtparser.parse(g["start_dt"]),
-                            msg_key=msg_key,
+                        refpick_key = f"refpick_{g['id']}_{a['slot_no']}"
+                        pick = st.selectbox(
+                            "Referee",
+                            ref_options,
+                            index=default_index,
+                            key=refpick_key,
+                            disabled=(status in ("ACCEPTED", "ASSIGNED")),
                         )
+
+                        if pick != "— Select referee —":
+                            chosen_ref_id = ref_lookup[pick]
+                            if status in ("ACCEPTED", "ASSIGNED"):
+                                st.info("This slot is locked (ACCEPTED/ASSIGNED). Use Action → RESET to change it.")
+                            else:
+                                if a["referee_id"] != chosen_ref_id:
+                                    set_assignment_ref(a["id"], chosen_ref_id)
+                                    st.rerun()
+                        else:
+                            if a["referee_id"] is not None:
+                                clear_assignment(a["id"])
+                                st.session_state[refpick_key] = "— Select referee —"
+                                st.rerun()
+
+                        blackout = False
+                        if a["referee_id"] is not None:
+                            blackout = referee_has_blackout(a["referee_id"], gdate)
+
+                        if status == "ACCEPTED":
+                            status_badge(f"✅ {a['ref_name']} — ACCEPTED", bg="#2e7d32")
+                        elif status == "ASSIGNED":
+                            status_badge(f"✅ {a['ref_name']} — ASSIGNED", bg="#2e7d32")
+                        elif status == "DECLINED":
+                            status_badge(f"❌ {a['ref_name']} — DECLINED", bg="#c62828")
+                        elif status == "OFFERED":
+                            status_badge(f"⬜ {a['ref_name']} — OFFERED", bg="#546e7a")
+                        elif a["referee_id"] is not None:
+                            status_badge(f"⬛ {a['ref_name']} — NOT OFFERED YET", bg="#424242")
+                        else:
+                            st.caption("EMPTY")
+
+                        if blackout:
+                            st.warning(f"Blackout date conflict: {gdate.isoformat()}")
+
+                        action_key = f"action_{a['id']}"
+                        msg_key = f"msg_{a['id']}"
+                        st.session_state.setdefault(action_key, "—")
+
+                        action_options = ["—", "OFFER", "ASSIGN", "DELETE", "RESET"]
+                        if status in ("ACCEPTED", "ASSIGNED"):
+                            action_options = ["—", "RESET", "DELETE"]
+
+                        def on_action_change(
+                            assignment_id=a["id"],
+                            game_row=g,
+                            start_dt=start_dt,
+                            gdate=gdate,
+                            action_key=action_key,
+                            msg_key=msg_key,
+                            refpick_key=refpick_key,
+                        ):
+                            choice = st.session_state.get(action_key, "—")
+                            st.session_state.pop(msg_key, None)
+
+                            if choice == "—":
+                                return
+
+                            live_a = get_assignment_live(assignment_id)
+                            if not live_a:
+                                st.session_state[msg_key] = "Could not load assignment."
+                                st.session_state[action_key] = "—"
+                                st.rerun()
+                                return
+
+                            live_ref_id = live_a["referee_id"]
+                            live_ref_name = live_a["ref_name"]
+                            live_ref_email = live_a["ref_email"]
+                            live_status = (live_a["status"] or "").strip().upper()
+
+                            live_blackout = False
+                            if live_ref_id is not None:
+                                live_blackout = referee_has_blackout(int(live_ref_id), gdate)
+
+                            if live_ref_id is None and choice in ("OFFER", "ASSIGN"):
+                                st.session_state[msg_key] = "Select a referee first."
+                                st.session_state[action_key] = "—"
+                                return
+
+                            if choice == "OFFER" and live_status in ("ACCEPTED", "ASSIGNED"):
+                                st.session_state[msg_key] = "This slot is already confirmed (ACCEPTED/ASSIGNED)."
+                                st.session_state[action_key] = "—"
+                                return
+
+                            if choice == "OFFER":
+                                if live_blackout:
+                                    st.session_state[msg_key] = (
+                                        "Offer blocked: referee is unavailable on this date (blackout). "
+                                        "You can still ASSIGN manually if needed."
+                                    )
+                                    st.session_state[action_key] = "—"
+                                    return
+
+                                send_offer_email_and_mark_offered(
+                                    assignment_id=assignment_id,
+                                    referee_name=live_ref_name,
+                                    referee_email=live_ref_email,
+                                    game=game_row,
+                                    start_dt=start_dt,
+                                    msg_key=msg_key,
+                                )
+
+                            elif choice == "ASSIGN":
+                                set_assignment_status(assignment_id, "ASSIGNED")
+                                st.session_state[msg_key] = "Assigned."
+
+                            elif choice in ("DELETE", "RESET"):
+                                clear_assignment(assignment_id)
+                                st.session_state[refpick_key] = "— Select referee —"
+                                st.session_state[msg_key] = "Slot cleared (EMPTY)."
+
+                            st.session_state[action_key] = "—"
+                            st.rerun()
+
+                        st.selectbox(
+                            "Action",
+                            action_options,
+                            key=action_key,
+                            on_change=on_action_change,
+                        )
+
                         if st.session_state.get(msg_key):
-                            st.caption(st.session_state[msg_key])
-                        st.rerun()
-
-                st.caption(" ")   
-
+                            st.info(st.session_state[msg_key])
 
 # ============================================================
 # Ladder tab
 # ============================================================
 with tabs[1]:
     st.subheader("Competition Ladder (Admin)")
-    st.caption("Set divisions + opening balances, enter results (incl DEFAULT), then view ladder + audit.")
+    st.caption("Enter team divisions + opening balance + game results, then view ladder + audit breakdown for fault finding.")
 
     games = get_games()
     if not games:
@@ -3466,12 +2738,16 @@ with tabs[1]:
 
     teams_rows = list_teams()
     existing = {
-        (t["name"] or "").strip(): {
-            "division": (t["division"] or "").strip(),
-            "opening_balance": int(t["opening_balance"] or 0),
+        r["name"]: {
+            "division": (r["division"] or "").strip(),
+            "opening": int(r["opening_balance"] or 0),
         }
-        for t in teams_rows
+        for r in teams_rows
     }
+
+    if not teams_today:
+        st.info("No teams found for this date.")
+        st.stop()
 
     div_col1, div_col2 = st.columns([2, 1], gap="large")
 
@@ -3479,31 +2755,31 @@ with tabs[1]:
         st.write("Set division + opening balance per team (saved immediately).")
 
         for t in teams_today:
-            current_div = (existing.get(t, {}).get("division") or "").strip()
-            current_open = int(existing.get(t, {}).get("opening_balance") or 0)
+            cur_div = (existing.get(t, {}).get("division") or "").strip()
+            cur_open = int(existing.get(t, {}).get("opening") or 0)
 
-            d_idx = DIVISIONS.index(current_div) if current_div in DIVISIONS else 0
+            default_idx = DIVISIONS.index(cur_div) if cur_div in DIVISIONS else 0
 
-            cA, cB = st.columns([2, 1], vertical_alignment="center")
-            with cA:
+            r1, r2 = st.columns([2, 1], gap="medium")
+            with r1:
                 new_div = st.selectbox(
                     label=t,
                     options=DIVISIONS,
-                    index=d_idx,
+                    index=default_idx,
                     key=f"div_select_{selected_date.isoformat()}_{t}",
                 )
-            with cB:
+            with r2:
                 new_open = st.number_input(
                     label="Opening",
                     min_value=0,
                     step=1,
-                    value=current_open,
+                    value=cur_open,
                     key=f"open_{selected_date.isoformat()}_{t}",
                 )
 
-            if new_div != current_div or int(new_open) != current_open:
-                upsert_team(t, new_div, opening_balance=int(new_open))
-                existing[t] = {"division": new_div, "opening_balance": int(new_open)}
+            if new_div != cur_div or int(new_open) != cur_open:
+                upsert_team(t, new_div, int(new_open))
+                existing[t] = {"division": new_div, "opening": int(new_open)}
 
     with div_col2:
         st.write("Teams (today)")
@@ -3513,7 +2789,7 @@ with tabs[1]:
                 {
                     "Team": t,
                     "Division": (existing.get(t, {}).get("division") or "").strip() or "—",
-                    "Opening": int(existing.get(t, {}).get("opening_balance") or 0),
+                    "Opening": int(existing.get(t, {}).get("opening") or 0),
                 }
                 for t in teams_today
             ]
@@ -3522,11 +2798,14 @@ with tabs[1]:
         if df_teams_today.empty:
             st.caption("No teams found.")
         else:
+            # Sort: Division (asc), Opening (desc), Team (asc)
             df_teams_today = df_teams_today.sort_values(
                 by=["Division", "Opening", "Team"],
                 ascending=[True, False, True],
             ).reset_index(drop=True)
 
+            # Fit height so there's no internal scroll bar
+            # ~35px per row + header padding is a good Streamlit rule of thumb
             row_h = 35
             height = min(900, (len(df_teams_today) + 1) * row_h + 10)
 
@@ -3538,7 +2817,7 @@ with tabs[1]:
             )
 
     st.markdown("---")
-    st.markdown("### 2) Enter game results (scores + referee inputs + DEFAULT)")
+    st.markdown("### 2) Enter game results (scores + referee inputs)")
 
     if not todays_games:
         st.info("No games found for this date.")
@@ -3552,31 +2831,20 @@ with tabs[1]:
 
         d_home_score = int(gr["home_score"]) if gr else 0
         d_away_score = int(gr["away_score"]) if gr else 0
+
         d_hft = int(gr["home_female_tries"]) if gr else 0
         d_aft = int(gr["away_female_tries"]) if gr else 0
+
         d_hc = int(gr["home_conduct"]) if gr else 0
         d_ac = int(gr["away_conduct"]) if gr else 0
+
         d_hu = int(gr["home_unstripped"]) if gr else 0
         d_au = int(gr["away_unstripped"]) if gr else 0
-        d_hd = int(gr["home_defaulted"]) if gr else 0
-        d_ad = int(gr["away_defaulted"]) if gr else 0
 
         with st.container(border=True):
             st.markdown(f"**{title}**")
 
-            c0, c1, c2, c3 = st.columns([1, 1, 1, 1], gap="large")
-
-            with c0:
-                st.markdown("**DEFAULTED**")
-                home_def = st.checkbox(f"{g['home_team']} defaulted", value=bool(d_hd), key=f"hd_{g['id']}")
-                away_def = st.checkbox(f"{g['away_team']} defaulted", value=bool(d_ad), key=f"ad_{g['id']}")
-
-                if home_def and away_def:
-                    st.error("Only ONE team can be marked defaulted.")
-                elif home_def:
-                    st.info("Default rules apply: this team gets 10; opponent gets 13.")
-                elif away_def:
-                    st.info("Default rules apply: this team gets 10; opponent gets 13.")
+            c1, c2, c3 = st.columns([1, 1, 1], gap="large")
 
             with c1:
                 st.markdown("**Score**")
@@ -3647,24 +2915,19 @@ with tabs[1]:
                 )
 
             if st.button("Save result", key=f"save_res_{g['id']}"):
-                try:
-                    upsert_game_result(
-                        game_id=int(g["id"]),
-                        home_score=int(home_score),
-                        away_score=int(away_score),
-                        home_female_tries=int(home_ft),
-                        away_female_tries=int(away_ft),
-                        home_conduct=int(home_conduct),
-                        away_conduct=int(away_conduct),
-                        home_unstripped=int(home_un),
-                        away_unstripped=int(away_un),
-                        home_defaulted=1 if home_def else 0,
-                        away_defaulted=1 if away_def else 0,
-                    )
-                    st.success("Saved.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
+                upsert_game_result(
+                    game_id=int(g["id"]),
+                    home_score=int(home_score),
+                    away_score=int(away_score),
+                    home_female_tries=int(home_ft),
+                    away_female_tries=int(away_ft),
+                    home_conduct=int(home_conduct),
+                    away_conduct=int(away_conduct),
+                    home_unstripped=int(home_un),
+                    away_unstripped=int(away_un),
+                )
+                st.success("Saved.")
+                st.rerun()
 
     st.markdown("---")
     st.markdown("### 3) Ladder + audit (fault finding)")
@@ -3682,7 +2945,7 @@ with tabs[1]:
     if not divisions:
         divisions = ["—"]
 
-    div_choice = st.selectbox("Division", divisions, key="ladder_div_select")
+    div_choice = st.selectbox("Division (view)", divisions, key="ladder_div_select")
 
     df_ladder = ladder_table_df_for_date(selected_date, div_choice)
     if df_ladder.empty:
