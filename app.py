@@ -199,6 +199,7 @@ def ensure_ladder_tables():
     Safe migrations for ladder system:
     - teams: team name + division + opening_balance
     - game_results: one row per game with admin-entered scoring inputs
+      + default flags
     """
     conn = db()
     try:
@@ -215,7 +216,6 @@ def ensure_ladder_tables():
             """
         )
 
-        # If teams table already existed without opening_balance, add it safely
         cols = conn.execute("PRAGMA table_info(teams);").fetchall()
         col_names = {c["name"] for c in cols}
         if "opening_balance" not in col_names:
@@ -239,6 +239,9 @@ def ensure_ladder_tables():
                 home_unstripped INTEGER NOT NULL DEFAULT 0,
                 away_unstripped INTEGER NOT NULL DEFAULT 0,
 
+                home_defaulted INTEGER NOT NULL DEFAULT 0, -- 0/1
+                away_defaulted INTEGER NOT NULL DEFAULT 0, -- 0/1
+
                 updated_at TEXT NOT NULL,
 
                 FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
@@ -246,10 +249,18 @@ def ensure_ladder_tables():
             """
         )
 
+        # Safe add columns for existing DBs
+        cols = conn.execute("PRAGMA table_info(game_results);").fetchall()
+        gr_cols = {c["name"] for c in cols}
+
+        if "home_defaulted" not in gr_cols:
+            conn.execute("ALTER TABLE game_results ADD COLUMN home_defaulted INTEGER NOT NULL DEFAULT 0;")
+        if "away_defaulted" not in gr_cols:
+            conn.execute("ALTER TABLE game_results ADD COLUMN away_defaulted INTEGER NOT NULL DEFAULT 0;")
+
         conn.commit()
     finally:
         conn.close()
-
 
 
 def init_db():
@@ -1244,6 +1255,8 @@ def get_game_result(game_id: int) -> sqlite3.Row | None:
             home_female_tries, away_female_tries,
             home_conduct, away_conduct,
             home_unstripped, away_unstripped,
+            COALESCE(home_defaulted,0) AS home_defaulted,
+            COALESCE(away_defaulted,0) AS away_defaulted,
             updated_at
         FROM game_results
         WHERE game_id=?
@@ -1266,7 +1279,16 @@ def upsert_game_result(
     away_conduct: int,
     home_unstripped: int,
     away_unstripped: int,
+    home_defaulted: int = 0,
+    away_defaulted: int = 0,
 ):
+    # Defensive: never allow both to be 1
+    hd = 1 if int(home_defaulted or 0) else 0
+    ad = 1 if int(away_defaulted or 0) else 0
+    if hd == 1 and ad == 1:
+        hd = 0
+        ad = 0
+
     conn = db()
     try:
         conn.execute(
@@ -1277,9 +1299,10 @@ def upsert_game_result(
                 home_female_tries, away_female_tries,
                 home_conduct, away_conduct,
                 home_unstripped, away_unstripped,
+                home_defaulted, away_defaulted,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(game_id) DO UPDATE SET
                 home_score=excluded.home_score,
                 away_score=excluded.away_score,
@@ -1289,6 +1312,8 @@ def upsert_game_result(
                 away_conduct=excluded.away_conduct,
                 home_unstripped=excluded.home_unstripped,
                 away_unstripped=excluded.away_unstripped,
+                home_defaulted=excluded.home_defaulted,
+                away_defaulted=excluded.away_defaulted,
                 updated_at=excluded.updated_at
             """,
             (
@@ -1297,6 +1322,7 @@ def upsert_game_result(
                 int(home_female_tries), int(away_female_tries),
                 int(home_conduct), int(away_conduct),
                 int(home_unstripped), int(away_unstripped),
+                int(hd), int(ad),
                 now_iso(),
             ),
         )
@@ -1335,7 +1361,10 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 gr.home_female_tries, gr.away_female_tries,
                 gr.home_conduct, gr.away_conduct,
                 gr.home_unstripped, gr.away_unstripped,
-                gr.updated_at
+                gr.updated_at,
+                COALESCE(gr.home_defaulted,0) AS home_defaulted,
+                COALESCE(gr.away_defaulted,0) AS away_defaulted
+
             FROM games g
             LEFT JOIN teams t1 ON t1.name = g.home_team
             LEFT JOIN teams t2 ON t2.name = g.away_team
@@ -1362,7 +1391,7 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
 
             UNION ALL
 
-            SELECT
+                        SELECT
                 game_id, start_dt, field_name,
                 away_team AS team,
                 home_team AS opponent,
@@ -1375,6 +1404,9 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 away_female_tries AS female_tries,
                 away_conduct AS conduct,
                 away_unstripped AS unstripped,
+
+                away_defaulted AS team_defaulted,
+                home_defaulted AS opp_defaulted,
 
                 updated_at
             FROM base
@@ -1392,16 +1424,21 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
             (pf - pa) AS margin,
 
             CASE
+              WHEN team_defaulted = 1 THEN 'L'
+              WHEN opp_defaulted = 1 THEN 'W'
               WHEN pf > pa THEN 'W'
               WHEN pf = pa THEN 'D'
               ELSE 'L'
             END AS result,
 
             CASE
+              WHEN team_defaulted = 1 THEN 0
+              WHEN opp_defaulted = 1 THEN ?
               WHEN pf > pa THEN ?
               WHEN pf = pa THEN ?
               ELSE ?
             END AS match_pts,
+
 
             CASE
               WHEN pf < pa AND (pa - pf) IN (1,2) THEN 1 ELSE 0
@@ -1410,7 +1447,10 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
             female_tries,
             CASE WHEN female_tries >= 4 THEN 1 ELSE 0 END AS female_bp,
 
-            conduct,
+            CASE
+              WHEN team_defaulted = 1 OR opp_defaulted = 1 THEN 10
+              ELSE conduct
+            END AS conduct,
 
             unstripped,
             CASE WHEN unstripped >= 3 THEN -2 ELSE 0 END AS unstripped_pen,
@@ -1419,8 +1459,9 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
         FROM teamsplit
         ORDER BY start_dt ASC, field_name ASC, team ASC
         """,
-        (start_min, start_max, LADDER_WIN_PTS, LADDER_DRAW_PTS, LADDER_LOSS_PTS),
+        (start_min, start_max, LADDER_WIN_PTS, LADDER_WIN_PTS, LADDER_DRAW_PTS, LADDER_LOSS_PTS),
     ).fetchall()
+
     conn.close()
 
     out = []
