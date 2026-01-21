@@ -3117,21 +3117,17 @@ with tabs[1]:
                     r1c2.error("Only ONE team can be marked as DEFAULTED.")
                     r2c2.error("Only ONE team can be marked as DEFAULTED.")
                 else:
-                    # Home team row message
+                    # Home row message (add icon if home defaulted)
                     if home_defaulted:
-                        r1c2.markdown("**Allocate 10 points for Conduct**")
+                        r1c2.markdown("⚠️ **Allocate 10 points for Conduct**")
                     else:
-                        r1c2.markdown(
-                            "**Allocate 10 points for Conduct and 3 points for the Win**"
-                        )
+                        r1c2.markdown("**Allocate 10 points for Conduct and 3 points for the Win**")
 
-                    # Away team row message
+                    # Away row message (add icon if away defaulted)
                     if away_defaulted:
-                        r2c2.markdown("**Allocate 10 points for Conduct**")
+                        r2c2.markdown("⚠️ **Allocate 10 points for Conduct**")
                     else:
-                        r2c2.markdown(
-                            "**Allocate 10 points for Conduct and 3 points for the Win**"
-                        )
+                        r2c2.markdown("**Allocate 10 points for Conduct and 3 points for the Win**")
 
                 # Messages only (no scoring automation)
                 if home_defaulted and away_defaulted:
