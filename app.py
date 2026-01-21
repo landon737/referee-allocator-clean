@@ -2335,6 +2335,32 @@ if not st.session_state.get("admin_email"):
             except Exception as e:
                 st.error(str(e))
 
+    # ------------------------------------------------------------
+    # Emergency / DEV: show admin login link on screen (no email)
+    # Enable by setting environment variable:
+    #   SHOW_ADMIN_LINK = "true"
+    # ------------------------------------------------------------
+    if os.getenv("SHOW_ADMIN_LINK", "false").lower() == "true":
+        st.markdown("---")
+        st.subheader("Emergency Admin Link (no email)")
+
+        if st.button("Generate admin login link (display here)", key="show_admin_link_btn"):
+            if not email.strip():
+                st.error("Please enter an email above first.")
+            elif not is_admin_email_allowed(email):
+                st.error("That email is not an authorised administrator.")
+            else:
+                cfg = smtp_settings()
+                base = (cfg.get("app_base_url") or "").rstrip("/")
+                if not base:
+                    st.error("APP_BASE_URL is missing. Set it in Render environment variables.")
+                else:
+                    token = create_admin_login_token(email.strip().lower(), minutes_valid=15)
+                    login_url = f"{base}/?admin_login=1&token={token}"
+                    st.success("Login link generated (valid 15 minutes):")
+                    st.code(login_url)
+                    st.caption("Open that link in a new tab to log in.")
+
     st.stop()
 
 # Logged in view
