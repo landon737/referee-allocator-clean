@@ -668,6 +668,33 @@ def admin_logout_button():
                 st.query_params.pop("session", None)
                 st.rerun()
 
+
+def create_admin_session_with_expires_at(email: str, expires_at_iso: str) -> str:
+    """
+    DEV helper: creates an admin session with a fixed expiry.
+    Used for permanent DEV admin URLs (no email).
+    """
+    token = secrets.token_urlsafe(32)
+
+    conn = db()
+    conn.execute(
+        """
+        INSERT INTO admin_sessions(email, token, created_at, expires_at, revoked_at)
+        VALUES (?, ?, ?, ?, NULL)
+        """,
+        (
+            email.strip().lower(),
+            token,
+            now_iso(),
+            expires_at_iso,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    return token
+
+
 # ============================================================
 # Imports & data helpers
 # ============================================================
@@ -2360,6 +2387,43 @@ if not st.session_state.get("admin_email"):
                     st.success("Login link generated (valid 15 minutes):")
                     st.code(login_url)
                     st.caption("Open that link in a new tab to log in.")
+
+
+    # ------------------------------------------------------------
+    # DEV Admin URL (no email) — enabled via environment variable
+    # ------------------------------------------------------------
+    if os.getenv("DEV_ADMIN_URL_ENABLED", "false").lower() == "true":
+        st.markdown("---")
+        st.subheader("DEV Admin Login (no email)")
+
+        if st.button("Generate DEV admin login URL", key="dev_admin_url_btn"):
+            dev_email = os.getenv("DEV_ADMIN_EMAIL", "").strip().lower()
+
+            if not dev_email:
+                st.error("DEV_ADMIN_EMAIL is not set in environment variables.")
+            elif not is_admin_email_allowed(dev_email):
+                st.error(f"{dev_email} is not an active admin.")
+            else:
+                cfg = smtp_settings()
+                base = (cfg.get("app_base_url") or "").rstrip("/")
+
+                if not base:
+                    st.error("APP_BASE_URL is missing.")
+                else:
+                    # 90-day expiry (adjust if needed)
+                    expires_at = (
+                        datetime.now(timezone.utc) + timedelta(days=90)
+                    ).isoformat(timespec="seconds")
+
+                    token = create_admin_session_with_expires_at(dev_email, expires_at)
+                    url = f"{base}/?session={token}"
+
+                    st.success("DEV admin login URL created:")
+                    st.code(url)
+                    st.caption(
+                        "Bookmark this URL. Disable DEV_ADMIN_URL_ENABLED when finished."
+                    )
+
 
     st.stop()
 
