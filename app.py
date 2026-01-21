@@ -635,7 +635,7 @@ def send_admin_login_email(email: str) -> str:
           Sign in
         </a>
       </p>
-      <p>If you didn’t request this, you can ignore this email.</p>
+      <p>If you didn't request this, you can ignore this email.</p>
     </div>
     """
     send_html_email(email, email, subject, html, text_body=text)
