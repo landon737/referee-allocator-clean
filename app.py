@@ -3112,13 +3112,13 @@ with tabs[1]:
                     key=f"ad_{g['id']}",
                 )
 
-                # Only render messages IF something is ticked
+                # Only render text IF something is ticked
                 if home_defaulted or away_defaulted:
 
-                    # Guard: only one team can default
+                    # Invalid state: both ticked
                     if home_defaulted and away_defaulted:
-                        r1c2.error("Only ONE team can be marked as DEFAULTED.")
-                        r2c2.error("Only ONE team can be marked as DEFAULTED.")
+                        r1c2.markdown("⚠️ **Only ONE team can be marked as DEFAULTED**")
+                        r2c2.markdown("⚠️ **Only ONE team can be marked as DEFAULTED**")
                     else:
                         # Home row
                         if home_defaulted:
