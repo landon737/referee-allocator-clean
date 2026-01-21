@@ -3133,49 +3133,6 @@ with tabs[0]:
             else:
                 st.caption("Build scorecards first.")
 
- # ============================================================
-# Admin tab
-# ============================================================
-with tabs[0]:
-    # Keep scroll position stable across reruns/autorefresh
-    preserve_scroll("refalloc_admin_scroll")
-
-    st.subheader("Games & Assignments")
-
-    # --- Auto refresh ---
-    auto = st.toggle("Auto-refresh every 5 seconds", value=True, key="auto_refresh_toggle")
-    if auto:
-        st_autorefresh(interval=5000, key="auto_refresh_tick")
-
-    if st.button("Refresh status", key="refresh_status_btn"):
-        st.rerun()
-
-    # --- Load data ---
-    games = get_games()
-    refs = get_referees()
-
-    if not games:
-        st.info("Import a Games CSV first (Import tab).")
-        st.stop()
-
-    # --- Date selector ---
-    all_dates = sorted({game_local_date(g) for g in games})
-    today = date.today()
-    default_idx = 0
-    for i, d in enumerate(all_dates):
-        if d >= today:
-            default_idx = i
-            break
-
-    selected_date = st.selectbox(
-        "Show games for date",
-        all_dates,
-        index=default_idx,
-        key="games_date_select",
-    )
-
-    todays_games = [g for g in games if game_local_date(g) == selected_date]
-    st.caption(f"{len(todays_games)} game(s) on {selected_date.isoformat()}")
 
     # ========================================================
     # Printable Summary (PDF + XLSX + Scorecards PDF)
