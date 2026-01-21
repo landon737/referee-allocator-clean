@@ -3164,7 +3164,7 @@ with tabs[1]:
 
             st.markdown("")
 
-            if st.button("Save result", key=f"save_res_{g['id']}"):
+            if st.button("Save result", key=f"save_res_{g['id']}_ladder"):
                 if home_defaulted and away_defaulted:
                     st.error("Cannot save: only one team can be marked as DEFAULTED.")
                 else:
@@ -3185,7 +3185,6 @@ with tabs[1]:
                     st.rerun()
 
 
-            if st.button("Save result", key=f"save_res_{g['id']}"):
                 if home_defaulted and away_defaulted:
                     st.error("Cannot save: only one team can be marked as DEFAULTED.")
                 else:
