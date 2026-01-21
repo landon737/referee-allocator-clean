@@ -3112,22 +3112,29 @@ with tabs[1]:
                     key=f"ad_{g['id']}",
                 )
 
-                # Guard: only one team can default
-                if home_defaulted and away_defaulted:
-                    r1c2.error("Only ONE team can be marked as DEFAULTED.")
-                    r2c2.error("Only ONE team can be marked as DEFAULTED.")
-                else:
-                    # Home row message (add icon if home defaulted)
-                    if home_defaulted:
-                        r1c2.markdown("⚠️ **Allocate 10 points for Conduct**")
-                    else:
-                        r1c2.markdown("**Allocate 10 points for Conduct and 3 points for the Win**")
+                # Only render messages IF something is ticked
+                if home_defaulted or away_defaulted:
 
-                    # Away row message (add icon if away defaulted)
-                    if away_defaulted:
-                        r2c2.markdown("⚠️ **Allocate 10 points for Conduct**")
+                    # Guard: only one team can default
+                    if home_defaulted and away_defaulted:
+                        r1c2.error("Only ONE team can be marked as DEFAULTED.")
+                        r2c2.error("Only ONE team can be marked as DEFAULTED.")
                     else:
-                        r2c2.markdown("**Allocate 10 points for Conduct and 3 points for the Win**")
+                        # Home row
+                        if home_defaulted:
+                            r1c2.markdown("⚠️ **Allocate 10 points for Conduct**")
+                        elif away_defaulted:
+                            r1c2.markdown(
+                                "**Allocate 10 points for Conduct and 3 points for the Win**"
+                            )
+
+                        # Away row
+                        if away_defaulted:
+                            r2c2.markdown("⚠️ **Allocate 10 points for Conduct**")
+                        elif home_defaulted:
+                            r2c2.markdown(
+                                "**Allocate 10 points for Conduct and 3 points for the Win**"
+                            )
 
                 # Messages only (no scoring automation)
                 if home_defaulted and away_defaulted:
