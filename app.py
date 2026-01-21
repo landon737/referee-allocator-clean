@@ -6,6 +6,11 @@ import sqlite3
 import secrets
 import smtplib
 import streamlit.components.v1 as components
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils import get_column_letter
+
 
 def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
     """
@@ -1998,6 +2003,99 @@ def build_referee_scorecards_pdf_bytes(selected_date: date) -> bytes:
 
 
 # ============================================================
+# Printable XLSX helpers
+# ============================================================
+def build_admin_summary_xlsx_bytes(selected_date: date) -> bytes:
+    games = get_admin_print_rows_for_date(selected_date)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Game Summary"
+
+    # Styles
+    title_font = Font(bold=True, size=16)
+    header_font = Font(bold=True, size=11)
+    bold_font = Font(bold=True)
+    center = Alignment(horizontal="center", vertical="center")
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    header_fill = PatternFill("solid", fgColor="D9D9D9")  # light grey
+    group_fill = PatternFill("solid", fgColor="F2F2F2")
+
+    # Title row
+    ws["A1"] = "Game Summary"
+    ws["A1"].font = title_font
+    ws["A2"] = selected_date.isoformat()
+    ws["A2"].font = bold_font
+
+    row = 4
+
+    if not games:
+        ws[f"A{row}"] = "No games found for this date."
+        out = BytesIO()
+        wb.save(out)
+        return out.getvalue()
+
+    # Group by start time (same as PDF)
+    grouped: dict[str, list[tuple[datetime, dict]]] = {}
+    for g in games:
+        dt = dtparser.parse(g["start_dt"])
+        key = _time_12h(dt)
+        grouped.setdefault(key, []).append((dt, g))
+
+    group_keys = sorted(grouped.keys(), key=lambda k: min(dt for dt, _ in grouped[k]))
+
+    # Column headings
+    cols = ["Teams", "Field", "Start", "Referees"]
+
+    for time_key in group_keys:
+        # Group header
+        ws[f"A{row}"] = f"Start time: {time_key}"
+        ws[f"A{row}"].font = Font(bold=True, size=12)
+        ws[f"A{row}"].fill = group_fill
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(cols))
+        row += 1
+
+        # Table header
+        for c, name in enumerate(cols, start=1):
+            cell = ws.cell(row=row, column=c, value=name)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = center
+        row += 1
+
+        # Rows
+        for dt, g in grouped[time_key]:
+            teams = f"{g['home_team']} vs {g['away_team']}"
+            field = g["field_name"]
+            start_str = _time_12h(dt)
+
+            r1 = _format_ref_name(g["slots"][1]["name"], g["slots"][1]["status"])
+            r2 = _format_ref_name(g["slots"][2]["name"], g["slots"][2]["status"])
+            refs = f"{r1} / {r2}"
+
+            ws.cell(row=row, column=1, value=teams).alignment = left
+            ws.cell(row=row, column=2, value=field).alignment = left
+            ws.cell(row=row, column=3, value=start_str).alignment = center
+            ws.cell(row=row, column=4, value=refs).alignment = left
+            row += 1
+
+        row += 1  # spacer line
+
+    # Column widths
+    widths = [48, 16, 12, 34]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    # Freeze panes at first header area (nice UX)
+    ws.freeze_panes = "A4"
+
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+# ============================================================
 # Offers
 # ============================================================
 def create_offer(assignment_id: int) -> str:
@@ -2560,7 +2658,7 @@ with tabs[0]:
         st.markdown("---")
         st.subheader("Printable Summary")
 
-        c_pdf1, c_pdf2, c_pdf3, c_pdf4 = st.columns([1, 2, 1, 2])
+        c_pdf1, c_pdf2, c_x1, c_x2, c_pdf3, c_pdf4 = st.columns([1, 2, 1, 2, 1, 2])
 
         with c_pdf1:
             if st.button("Build Summary PDF", key="build_pdf_btn"):
@@ -2584,6 +2682,30 @@ with tabs[0]:
                 )
             else:
                 st.caption("Click **Build Summary PDF** to generate the printable schedule.")
+
+                with c_x1:
+            if st.button("Build Summary XLSX", key="build_xlsx_btn"):
+                try:
+                    xlsx_bytes = build_admin_summary_xlsx_bytes(selected_date)
+                    st.session_state["admin_summary_xlsx_bytes"] = xlsx_bytes
+                    st.success("Summary XLSX built.")
+                except Exception as e:
+                    st.error(f"Failed to build Summary XLSX: {e}")
+
+        with c_x2:
+            xlsx_bytes = st.session_state.get("admin_summary_xlsx_bytes")
+            if xlsx_bytes:
+                filename = f"game_summary_{selected_date.isoformat()}.xlsx"
+                st.download_button(
+                    label="Download Summary XLSX",
+                    data=xlsx_bytes,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_xlsx_btn",
+                )
+            else:
+                st.caption("Click **Build Summary XLSX** to generate the Excel schedule.")
+
 
         with c_pdf3:
             if st.button("Build Referee Scorecards", key="build_scorecards_btn"):
