@@ -223,6 +223,8 @@ def ensure_ladder_tables():
 
         cur.execute(
             """
+                    cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS game_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 game_id INTEGER NOT NULL UNIQUE,
@@ -239,8 +241,8 @@ def ensure_ladder_tables():
                 home_unstripped INTEGER NOT NULL DEFAULT 0,
                 away_unstripped INTEGER NOT NULL DEFAULT 0,
 
-                home_defaulted INTEGER NOT NULL DEFAULT 0, -- 0/1
-                away_defaulted INTEGER NOT NULL DEFAULT 0, -- 0/1
+                home_defaulted INTEGER NOT NULL DEFAULT 0,
+                away_defaulted INTEGER NOT NULL DEFAULT 0,
 
                 updated_at TEXT NOT NULL,
 
@@ -1386,12 +1388,15 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 home_conduct AS conduct,
                 home_unstripped AS unstripped,
 
+                home_defaulted AS team_defaulted,
+                away_defaulted AS opp_defaulted,
+
                 updated_at
             FROM base
 
             UNION ALL
 
-                        SELECT
+            SELECT
                 game_id, start_dt, field_name,
                 away_team AS team,
                 home_team AS opponent,
@@ -1411,6 +1416,7 @@ def ladder_audit_df_for_date(selected_date: date) -> pd.DataFrame:
                 updated_at
             FROM base
         )
+
         SELECT
             game_id,
             start_dt,
