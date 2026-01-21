@@ -2683,7 +2683,7 @@ with tabs[0]:
             else:
                 st.caption("Click **Build Summary PDF** to generate the printable schedule.")
 
-                with c_x1:
+        with c_x1:
             if st.button("Build Summary XLSX", key="build_xlsx_btn"):
                 try:
                     xlsx_bytes = build_admin_summary_xlsx_bytes(selected_date)
