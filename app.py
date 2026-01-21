@@ -3023,118 +3023,169 @@ with tabs[1]:
         with st.container(border=True):
             st.markdown(f"**{title}**")
 
-            c1, c2, c3 = st.columns([1, 1, 1], gap="large")
+            # Pull defaults (already computed above)
+            # d_home_score, d_away_score, d_hft, d_aft, d_hc, d_ac, d_hu, d_au, d_hd, d_ad
 
-            with c1:
+            # 6 columns: Team label | Score | Female Tries | Conduct | Unstripped | Default + Message
+            col_team, col_score, col_ft, col_conduct, col_un, col_msg = st.columns(
+                [1.6, 1.0, 1.2, 1.0, 1.1, 2.6],
+                gap="medium",
+            )
+
+            # Header row
+            with col_team:
+                st.markdown("**Team**")
+            with col_score:
                 st.markdown("**Score**")
-                home_score = st.number_input(
-                    f"{g['home_team']} score",
-                    min_value=0,
-                    step=1,
-                    value=d_home_score,
-                    key=f"hs_{g['id']}",
-                )
-                away_score = st.number_input(
-                    f"{g['away_team']} score",
-                    min_value=0,
-                    step=1,
-                    value=d_away_score,
-                    key=f"as_{g['id']}",
-                )
+            with col_ft:
+                st.markdown("**Female Tries**")
+            with col_conduct:
+                st.markdown("**Conduct**")
+            with col_un:
+                st.markdown("**Unstripped**")
+            with col_msg:
+                st.markdown("**Default**  \u00A0\u00A0\u00A0\u00A0\u00A0\u00A0  **Instructions**")
 
-            with c2:
-                st.markdown("**Female tries**")
-                home_ft = st.number_input(
-                    f"{g['home_team']} female tries",
-                    min_value=0,
-                    step=1,
-                    value=d_hft,
-                    key=f"hft_{g['id']}",
-                )
-                away_ft = st.number_input(
-                    f"{g['away_team']} female tries",
-                    min_value=0,
-                    step=1,
-                    value=d_aft,
-                    key=f"aft_{g['id']}",
-                )
+            # --- Team rows ---
+            # Row 1: Home
+            r1_team, r1_score, r1_ft, r1_conduct, r1_un, r1_msg = st.columns(
+                [1.6, 1.0, 1.2, 1.0, 1.1, 2.6],
+                gap="medium",
+            )
+            # Row 2: Away
+            r2_team, r2_score, r2_ft, r2_conduct, r2_un, r2_msg = st.columns(
+                [1.6, 1.0, 1.2, 1.0, 1.1, 2.6],
+                gap="medium",
+            )
 
-            with c3:
-                st.markdown("**Conduct / Unstripped / Default**")
-                home_conduct = st.number_input(
-                    f"{g['home_team']} conduct (/10)",
-                    min_value=0,
-                    max_value=10,
-                    step=1,
-                    value=d_hc,
-                    key=f"hc_{g['id']}",
-                )
-                away_conduct = st.number_input(
-                    f"{g['away_team']} conduct (/10)",
-                    min_value=0,
-                    max_value=10,
-                    step=1,
-                    value=d_ac,
-                    key=f"ac_{g['id']}",
-                )
+            # Team labels
+            r1_team.markdown(f"**{g['home_team']}**")
+            r2_team.markdown(f"**{g['away_team']}**")
 
-                home_un = st.number_input(
-                    f"{g['home_team']} unstripped",
-                    min_value=0,
-                    step=1,
-                    value=d_hu,
-                    key=f"hu_{g['id']}",
-                )
-                away_un = st.number_input(
-                    f"{g['away_team']} unstripped",
-                    min_value=0,
-                    step=1,
-                    value=d_au,
-                    key=f"au_{g['id']}",
-                )
+            # Inputs (collapsed labels keeps it tidy)
+            home_score = r1_score.number_input(
+                "home_score",
+                min_value=0,
+                step=1,
+                value=int(d_home_score),
+                key=f"hs_{g['id']}",
+                label_visibility="collapsed",
+            )
+            away_score = r2_score.number_input(
+                "away_score",
+                min_value=0,
+                step=1,
+                value=int(d_away_score),
+                key=f"as_{g['id']}",
+                label_visibility="collapsed",
+            )
 
-                st.markdown("---")
-                st.markdown("**Defaulted**")
+            home_ft = r1_ft.number_input(
+                "home_ft",
+                min_value=0,
+                step=1,
+                value=int(d_hft),
+                key=f"hft_{g['id']}",
+                label_visibility="collapsed",
+            )
+            away_ft = r2_ft.number_input(
+                "away_ft",
+                min_value=0,
+                step=1,
+                value=int(d_aft),
+                key=f"aft_{g['id']}",
+                label_visibility="collapsed",
+            )
 
-                # Two-column rows: checkbox | message
-                r1c1, r1c2 = st.columns([1, 2])
-                r2c1, r2c2 = st.columns([1, 2])
+            home_conduct = r1_conduct.number_input(
+                "home_conduct",
+                min_value=0,
+                max_value=10,
+                step=1,
+                value=int(d_hc),
+                key=f"hc_{g['id']}",
+                label_visibility="collapsed",
+            )
+            away_conduct = r2_conduct.number_input(
+                "away_conduct",
+                min_value=0,
+                max_value=10,
+                step=1,
+                value=int(d_ac),
+                key=f"ac_{g['id']}",
+                label_visibility="collapsed",
+            )
 
-                home_defaulted = r1c1.checkbox(
-                    f"{g['home_team']} DEFAULTED",
-                    value=bool(d_hd),
-                    key=f"hd_{g['id']}",
-                )
+            home_un = r1_un.number_input(
+                "home_un",
+                min_value=0,
+                step=1,
+                value=int(d_hu),
+                key=f"hu_{g['id']}",
+                label_visibility="collapsed",
+            )
+            away_un = r2_un.number_input(
+                "away_un",
+                min_value=0,
+                step=1,
+                value=int(d_au),
+                key=f"au_{g['id']}",
+                label_visibility="collapsed",
+            )
 
-                away_defaulted = r2c1.checkbox(
-                    f"{g['away_team']} DEFAULTED",
-                    value=bool(d_ad),
-                    key=f"ad_{g['id']}",
-                )
+            # Default checkboxes live in the "Default + Message" column
+            home_defaulted = r1_msg.checkbox(
+                "DEFAULTED (home)",
+                value=bool(d_hd),
+                key=f"hd_{g['id']}",
+            )
 
-                # Only render text IF something is ticked
-                if home_defaulted or away_defaulted:
+            away_defaulted = r2_msg.checkbox(
+                "DEFAULTED (away)",
+                value=bool(d_ad),
+                key=f"ad_{g['id']}",
+            )
 
-                    # Invalid state: both ticked
-                    if home_defaulted and away_defaulted:
-                        r1c2.markdown("⚠️ **Only ONE team can be marked as DEFAULTED**")
-                        r2c2.markdown("⚠️ **Only ONE team can be marked as DEFAULTED**")
-                    else:
-                        # Home row
-                        if home_defaulted:
-                            r1c2.markdown("⚠️ **Allocate 10 points for Conduct**")
-                        elif away_defaulted:
-                            r1c2.markdown(
-                                "**Allocate 10 points for Conduct and 3 points for the Win**"
-                            )
+            # Instruction text sits to the RIGHT of the checkbox area (same row)
+            # We do this by adding a nested 2-col split inside the message cell
+            # so checkbox stays left-ish and instructions are clearly separated.
+            # (No st.info/st.error -> no blue boxes)
+            if home_defaulted or away_defaulted:
+                if home_defaulted and away_defaulted:
+                    r1_msg.markdown("⚠️ **Only ONE team can be marked as DEFAULTED**")
+                    r2_msg.markdown("⚠️ **Only ONE team can be marked as DEFAULTED**")
+                elif home_defaulted:
+                    r1_msg.markdown("⚠️ **Allocate 10 points for Conduct**")
+                    r2_msg.markdown("**Allocate 10 points for Conduct and 3 points for the Win**")
+                elif away_defaulted:
+                    r2_msg.markdown("⚠️ **Allocate 10 points for Conduct**")
+                    r1_msg.markdown("**Allocate 10 points for Conduct and 3 points for the Win**")
 
-                        # Away row
-                        if away_defaulted:
-                            r2c2.markdown("⚠️ **Allocate 10 points for Conduct**")
-                        elif home_defaulted:
-                            r2c2.markdown(
-                                "**Allocate 10 points for Conduct and 3 points for the Win**"
-                            )
+
+            st.markdown("")
+
+            if st.button("Save result", key=f"save_res_{g['id']}"):
+                if home_defaulted and away_defaulted:
+                    st.error("Cannot save: only one team can be marked as DEFAULTED.")
+                else:
+                    upsert_game_result(
+                        game_id=int(g["id"]),
+                        home_score=int(home_score),
+                        away_score=int(away_score),
+                        home_female_tries=int(home_ft),
+                        away_female_tries=int(away_ft),
+                        home_conduct=int(home_conduct),
+                        away_conduct=int(away_conduct),
+                        home_unstripped=int(home_un),
+                        away_unstripped=int(away_un),
+                        home_defaulted=1 if home_defaulted else 0,
+                        away_defaulted=1 if away_defaulted else 0,
+                    )
+                    st.success("Saved.")
+                    st.rerun()
+            )
+
+            
 
 
             if st.button("Save result", key=f"save_res_{g['id']}"):
