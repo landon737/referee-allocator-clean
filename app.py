@@ -3008,24 +3008,24 @@ if not st.session_state.get("admin_email"):
     email = st.text_input("Admin email", key="login_email")
 
     if st.button("Send login link", key="send_login_link_btn"):
-    if not email.strip():
-        st.error("Please enter an email.")
-    elif not is_admin_email_allowed(email):
-        st.error("That email is not an authorised administrator.")
-    else:
-        try:
-            login_url = send_admin_login_email(email)
+        if not email.strip():
+            st.error("Please enter an email.")
+        elif not is_admin_email_allowed(email):
+            st.error("That email is not an authorised administrator.")
+        else:
+            try:
+                login_url = send_admin_login_email(email)
 
-            st.success("Login link generated.")
-            st.info("If the email doesn’t arrive, use this link directly:")
+                st.success("Login link generated.")
+                st.info("If the email doesn’t arrive, use this link directly:")
 
-            st.code(login_url)
+                st.code(login_url)
 
-            # Optional convenience button
-            st.markdown(f"[Open login link]({login_url})")
+                # Optional convenience button
+                st.markdown(f"[Open login link]({login_url})")
 
-        except Exception as e:
-            st.error(f"Failed to send login link: {e}")
+            except Exception as e:
+                st.error(f"Failed to send login link: {e}")
 
     st.stop()
 
