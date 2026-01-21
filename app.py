@@ -3183,9 +3183,6 @@ with tabs[1]:
                     )
                     st.success("Saved.")
                     st.rerun()
-            )
-
-            
 
 
             if st.button("Save result", key=f"save_res_{g['id']}"):
