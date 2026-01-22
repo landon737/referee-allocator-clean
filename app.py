@@ -3380,60 +3380,76 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Import CSVs")
 
+    # ----------------------------
+    # Games CSV
+    # ----------------------------
     st.markdown("### Games CSV")
-st.caption("Required columns: game_id, date, start_time, home_team, away_team, field")
+    st.caption("Required columns: game_id, date, start_time, home_team, away_team, field")
 
-replace_games_mode = st.checkbox(
-    "Replace ALL games with this CSV (overwrite existing draw)",
-    value=False,
-    key="replace_games_mode",
-)
+    replace_games_mode = st.checkbox(
+        "Replace ALL games with this CSV (overwrite existing draw)",
+        value=False,
+        key="replace_games_mode",
+    )
 
-games_file = st.file_uploader("Upload Games CSV", type=["csv"], key="games_csv")
-if games_file:
-    df_games = pd.read_csv(games_file)
-    st.dataframe(df_games.head(20), use_container_width=True)
+    games_file = st.file_uploader("Upload Games CSV", type=["csv"], key="games_csv")
+    if games_file:
+        df_games = pd.read_csv(games_file)
+        st.dataframe(df_games.head(20), use_container_width=True)
 
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        if st.button("Import Games", key="import_games_btn"):
-            try:
-                if replace_games_mode:
-                    imported = replace_games_csv(df_games)
-                    st.success(
-                        f"✅ Replaced the entire draw. Imported {imported} game(s). "
-                        "All assignments/offers/results were cleared."
-                    )
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            if st.button("Import Games", key="import_games_btn"):
+                try:
+                    if replace_games_mode:
+                        imported = replace_games_csv(df_games)
+                        st.success(
+                            f"✅ Replaced the entire draw. Imported {imported} game(s). "
+                            "All assignments/offers/results were cleared."
+                        )
 
-                    # Clear UI selections that might reference old game IDs/dates
-                    for k in [
-                        "games_date_select",
-                        "ladder_date_select",
-                        "admin_summary_pdf_bytes",
-                        "admin_summary_xlsx_bytes",
-                        "ref_scorecards_pdf_bytes",
-                    ]:
-                        st.session_state.pop(k, None)
+                        # Clear UI selections that might reference old game IDs/dates
+                        for k in [
+                            "games_date_select",
+                            "ladder_date_select",
+                            "admin_summary_pdf_bytes",
+                            "admin_summary_xlsx_bytes",
+                            "ref_scorecards_pdf_bytes",
+                        ]:
+                            st.session_state.pop(k, None)
 
-                    # Also clear any per-slot selectboxes
-                    for k in [k for k in st.session_state.keys() if str(k).startswith("refpick_")]:
-                        st.session_state.pop(k, None)
+                        # Also clear any per-slot selectboxes
+                        for k in [k for k in st.session_state.keys() if str(k).startswith("refpick_")]:
+                            st.session_state.pop(k, None)
 
-                else:
-                    ins, upd = import_games_csv(df_games)
-                    st.success(f"Imported games. Inserted: {ins}, Updated: {upd}")
+                    else:
+                        ins, upd = import_games_csv(df_games)
+                        st.success(f"Imported games. Inserted: {ins}, Updated: {upd}")
 
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
 
-    with c2:
-        if replace_games_mode:
-            st.warning(
-                "Replace mode will DELETE ALL existing games, assignments, offers, and ladder results "
-                "before importing this CSV."
-            )
+        with c2:
+            if replace_games_mode:
+                st.warning(
+                    "Replace mode will DELETE ALL existing games, assignments, offers, and ladder results "
+                    "before importing this CSV."
+                )
 
+    st.markdown("---")
+
+    # ----------------------------
+    # Referees CSV
+    # ----------------------------
+    st.markdown("### Referees CSV")
+    st.caption("Required columns: name, email (optional: phone)")
+
+    replace_mode = st.checkbox(
+        "Replace ALL referees with this CSV (resets assignments + offers + blackouts)",
+        value=False,
+        key="replace_refs_mode",
+    )
 
     refs_file = st.file_uploader("Upload Referees CSV", type=["csv"], key="refs_csv")
     if refs_file:
@@ -3445,7 +3461,7 @@ if games_file:
                 if replace_mode:
                     count = replace_referees_csv(df_refs)
                     st.success(
-                        f"Replaced referee list successfully. Imported {count} referee(s). "
+                        f"✅ Replaced referee list successfully. Imported {count} referee(s). "
                         "All assignments were reset to EMPTY."
                     )
                     for k in [k for k in st.session_state.keys() if str(k).startswith("refpick_")]:
@@ -3460,17 +3476,14 @@ if games_file:
 
     st.markdown("---")
 
+    # ----------------------------
+    # Blackouts CSV (optional)
+    # ----------------------------
     st.markdown("### Blackouts CSV (optional)")
     st.caption("Required columns: email, blackout_date")
 
-    bl_file = st.file_uploader("Upload Blackouts CSV", type=["csv"], key="bl_csv")
-    if bl_file:
-        df_bl = pd.read_csv(bl_file)
-        st.dataframe(df_bl.head(20), use_container_width=True)
-        if st.button("Import Blackouts", key="import_bl_btn"):
-            added, skipped = import_blackouts_csv(df_bl)
-            st.success(f"Imported blackouts. Added: {added}. Skipped: {skipped}")
-            st.rerun()
+    bl_file = st.file_uploader("Upload Blackouts CSV", type=["csv"]()
+
 
 # ============================================================
 # Blackouts tab
