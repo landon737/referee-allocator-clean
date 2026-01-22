@@ -918,6 +918,130 @@ def import_games_csv(df: pd.DataFrame):
     conn.close()
     return inserted, updated
 
+def replace_games_csv(df: pd.DataFrame):
+    """
+    REPLACE mode: deletes ALL games (and dependent data) then imports the CSV as the new draw.
+
+    What gets reset:
+      - offers (must be first; depends on assignments)
+      - assignments
+      - game_results (ladder scoring inputs)
+      - games
+
+    What is preserved:
+      - referees
+      - blackouts
+      - teams (divisions/opening balances)
+      - admins/admin sessions/tokens
+
+    Returns: (imported_games_count)
+    """
+    cols = {c.lower().strip(): c for c in df.columns}
+
+    key_col = None
+    for k in ["game_id", "game_key", "id"]:
+        if k in cols:
+            key_col = cols[k]
+            break
+
+    has_date_time = "date" in cols and "start_time" in cols
+    has_start_dt = "start_datetime" in cols
+
+    required = ["home_team", "away_team", "field"]
+    missing = [r for r in required if r not in cols]
+    if not key_col:
+        missing.append("game_id")
+    if not (has_date_time or has_start_dt):
+        missing.append("date + start_time (or start_datetime)")
+
+    if missing:
+        raise ValueError(f"Games CSV missing columns: {', '.join(missing)}")
+
+    # Build a clean list of new games first (so we never delete if CSV is junk)
+    new_games = []
+    seen_keys = set()
+
+    for _, row in df.iterrows():
+        game_key = str(row[key_col]).strip()
+        home = str(row[cols["home_team"]]).strip()
+        away = str(row[cols["away_team"]]).strip()
+        field = str(row[cols["field"]]).strip()
+
+        if not (game_key and home and away and field) or game_key.lower() == "nan":
+            continue
+
+        if game_key in seen_keys:
+            raise ValueError(f"Duplicate game_id/game_key found in CSV: {game_key}")
+        seen_keys.add(game_key)
+
+        try:
+            if has_date_time:
+                d_raw = str(row[cols["date"]]).strip()
+                t_raw = str(row[cols["start_time"]]).strip()
+                start_dt = dtparser.parse(f"{d_raw} {t_raw}")
+            else:
+                start_raw = str(row[cols["start_datetime"]]).strip()
+                start_dt = dtparser.parse(start_raw)
+        except Exception as e:
+            raise ValueError(f"Could not parse date/time for game_id={game_key}: {e}")
+
+        start_iso = start_dt.isoformat(timespec="minutes")
+        new_games.append((game_key, home, away, field, start_iso))
+
+    if len(new_games) == 0:
+        raise ValueError("Games CSV has no valid rows. Aborting replace import (nothing deleted).")
+
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN")
+
+        # Delete in dependency order
+        cur.execute("DELETE FROM offers")
+        cur.execute("DELETE FROM assignments")
+        cur.execute("DELETE FROM game_results")
+        cur.execute("DELETE FROM games")
+
+        # Optional: reset autoincrement counters (safe if table exists)
+        try:
+            cur.execute(
+                "DELETE FROM sqlite_sequence WHERE name IN ('games','assignments','offers','game_results')"
+            )
+        except Exception:
+            pass
+
+        # Insert new games + their 2 empty assignments
+        imported = 0
+        for game_key, home, away, field, start_iso in new_games:
+            cur.execute(
+                """
+                INSERT INTO games(game_key, home_team, away_team, field_name, start_dt)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (game_key, home, away, field, start_iso),
+            )
+            game_id = cur.lastrowid
+
+            for slot in (1, 2):
+                cur.execute(
+                    """
+                    INSERT INTO assignments(game_id, slot_no, referee_id, status, updated_at)
+                    VALUES (?, ?, NULL, 'EMPTY', ?)
+                    """,
+                    (game_id, slot, now_iso()),
+                )
+
+            imported += 1
+
+        conn.commit()
+        return imported
+
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 
 def import_blackouts_csv(df: pd.DataFrame):
     cols = {c.lower().strip(): c for c in df.columns}
@@ -3257,27 +3381,59 @@ with tabs[2]:
     st.subheader("Import CSVs")
 
     st.markdown("### Games CSV")
-    st.caption("Required columns: game_id, date, start_time, home_team, away_team, field")
+st.caption("Required columns: game_id, date, start_time, home_team, away_team, field")
 
-    games_file = st.file_uploader("Upload Games CSV", type=["csv"], key="games_csv")
-    if games_file:
-        df_games = pd.read_csv(games_file)
-        st.dataframe(df_games.head(20), use_container_width=True)
+replace_games_mode = st.checkbox(
+    "Replace ALL games with this CSV (overwrite existing draw)",
+    value=False,
+    key="replace_games_mode",
+)
+
+games_file = st.file_uploader("Upload Games CSV", type=["csv"], key="games_csv")
+if games_file:
+    df_games = pd.read_csv(games_file)
+    st.dataframe(df_games.head(20), use_container_width=True)
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
         if st.button("Import Games", key="import_games_btn"):
-            ins, upd = import_games_csv(df_games)
-            st.success(f"Imported games. Inserted: {ins}, Updated: {upd}")
-            st.rerun()
+            try:
+                if replace_games_mode:
+                    imported = replace_games_csv(df_games)
+                    st.success(
+                        f"✅ Replaced the entire draw. Imported {imported} game(s). "
+                        "All assignments/offers/results were cleared."
+                    )
 
-    st.markdown("---")
+                    # Clear UI selections that might reference old game IDs/dates
+                    for k in [
+                        "games_date_select",
+                        "ladder_date_select",
+                        "admin_summary_pdf_bytes",
+                        "admin_summary_xlsx_bytes",
+                        "ref_scorecards_pdf_bytes",
+                    ]:
+                        st.session_state.pop(k, None)
 
-    st.markdown("### Referees CSV")
-    st.caption("Required columns: name, email  (optional: phone)")
+                    # Also clear any per-slot selectboxes
+                    for k in [k for k in st.session_state.keys() if str(k).startswith("refpick_")]:
+                        st.session_state.pop(k, None)
 
-    replace_mode = st.checkbox(
-        "Replace ALL referees with this CSV (overwrite existing list)",
-        value=False,
-        key="replace_refs_mode",
-    )
+                else:
+                    ins, upd = import_games_csv(df_games)
+                    st.success(f"Imported games. Inserted: {ins}, Updated: {upd}")
+
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    with c2:
+        if replace_games_mode:
+            st.warning(
+                "Replace mode will DELETE ALL existing games, assignments, offers, and ladder results "
+                "before importing this CSV."
+            )
+
 
     refs_file = st.file_uploader("Upload Referees CSV", type=["csv"], key="refs_csv")
     if refs_file:
