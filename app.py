@@ -1110,6 +1110,91 @@ def get_referees():
     return rows
 
 
+with tabs[3]:
+    st.subheader("Manage Blackout Dates (date-only)")
+
+    refs = get_referees()
+    if not refs:
+        st.info("Import referees first.")
+        st.stop()
+
+    left_col, right_col = st.columns([2, 1], gap="large")
+
+    # ----------------------------
+    # LEFT: existing add/remove UI
+    # ----------------------------
+    with left_col:
+        ref_map = {f"{r['name']} ({r['email']})": r["id"] for r in refs}
+        choice = st.selectbox("Select referee", list(ref_map.keys()), key="blackout_ref_select")
+        ref_id = ref_map[choice]
+
+        add_date = st.date_input("Add blackout date", value=date.today(), key="blackout_add_date")
+        if st.button("Add date", key="blackout_add_btn"):
+            conn = db()
+            try:
+                conn.execute(
+                    "INSERT INTO blackouts(referee_id, blackout_date) VALUES (?, ?)",
+                    (ref_id, add_date.isoformat()),
+                )
+                conn.commit()
+                st.success("Added blackout date.")
+                st.rerun()
+            except sqlite3.IntegrityError:
+                st.warning("That date is already in the blackout list.")
+            finally:
+                conn.close()
+
+        st.markdown("### Current blackout dates (selected referee)")
+        conn = db()
+        rows = conn.execute(
+            """
+            SELECT blackout_date FROM blackouts
+            WHERE referee_id=?
+            ORDER BY blackout_date ASC
+            """,
+            (ref_id,),
+        ).fetchall()
+        conn.close()
+
+        if rows:
+            dates = [r["blackout_date"] for r in rows]
+            del_date = st.selectbox("Remove blackout date", dates, key="blackout_del_select")
+            if st.button("Remove selected date", key="blackout_del_btn"):
+                conn = db()
+                conn.execute(
+                    "DELETE FROM blackouts WHERE referee_id=? AND blackout_date=?",
+                    (ref_id, del_date),
+                )
+                conn.commit()
+                conn.close()
+                st.success("Removed.")
+                st.rerun()
+        else:
+            st.caption("No blackout dates set for this referee.")
+
+    # ----------------------------
+    # RIGHT: ALL blackouts table
+    # ----------------------------
+    with right_col:
+        st.markdown("### All blackout dates")
+        st.caption("Sorted by date (blank row between dates)")
+
+        df_all = list_all_blackouts_with_ref_names()
+
+        if df_all.empty:
+            st.caption("No blackout dates in the system.")
+        else:
+            # Set a reasonable height so it feels like a sidebar table
+            row_h = 32
+            height = min(900, (len(df_all) + 1) * row_h + 10)
+
+            st.dataframe(
+                df_all,
+                use_container_width=True,
+                hide_index=True,
+                height=height,
+            )
+
 
 def get_assignments_for_game(game_id: int):
     conn = db()
@@ -3500,6 +3585,90 @@ with tabs[2]:
 # Blackouts tab
 # ============================================================
 with tabs[3]:
+    st.subheader("Manage Blackout Dates (date-only)")
+
+    refs = get_referees()
+    if not refs:
+        st.info("Import referees first.")
+        st.stop()
+
+    left_col, right_col = st.columns([2, 1], gap="large")
+
+    # ----------------------------
+    # LEFT: existing add/remove UI
+    # ----------------------------
+    with left_col:
+        ref_map = {f"{r['name']} ({r['email']})": r["id"] for r in refs}
+        choice = st.selectbox("Select referee", list(ref_map.keys()), key="blackout_ref_select")
+        ref_id = ref_map[choice]
+
+        add_date = st.date_input("Add blackout date", value=date.today(), key="blackout_add_date")
+        if st.button("Add date", key="blackout_add_btn"):
+            conn = db()
+            try:
+                conn.execute(
+                    "INSERT INTO blackouts(referee_id, blackout_date) VALUES (?, ?)",
+                    (ref_id, add_date.isoformat()),
+                )
+                conn.commit()
+                st.success("Added blackout date.")
+                st.rerun()
+            except sqlite3.IntegrityError:
+                st.warning("That date is already in the blackout list.")
+            finally:
+                conn.close()
+
+        st.markdown("### Current blackout dates (selected referee)")
+        conn = db()
+        rows = conn.execute(
+            """
+            SELECT blackout_date FROM blackouts
+            WHERE referee_id=?
+            ORDER BY blackout_date ASC
+            """,
+            (ref_id,),
+        ).fetchall()
+        conn.close()
+
+        if rows:
+            dates = [r["blackout_date"] for r in rows]
+            del_date = st.selectbox("Remove blackout date", dates, key="blackout_del_select")
+            if st.button("Remove selected date", key="blackout_del_btn"):
+                conn = db()
+                conn.execute(
+                    "DELETE FROM blackouts WHERE referee_id=? AND blackout_date=?",
+                    (ref_id, del_date),
+                )
+                conn.commit()
+                conn.close()
+                st.success("Removed.")
+                st.rerun()
+        else:
+            st.caption("No blackout dates set for this referee.")
+
+    # ----------------------------
+    # RIGHT: ALL blackouts table
+    # ----------------------------
+    with right_col:
+        st.markdown("### All blackout dates")
+        st.caption("Sorted by date (blank row between dates)")
+
+        df_all = list_all_blackouts_with_ref_names()
+
+        if df_all.empty:
+            st.caption("No blackout dates in the system.")
+        else:
+            # Set a reasonable height so it feels like a sidebar table
+            row_h = 32
+            height = min(900, (len(df_all) + 1) * row_h + 10)
+
+            st.dataframe(
+                df_all,
+                use_container_width=True,
+                hide_index=True,
+                height=height,
+            )
+
     st.subheader("Manage Blackout Dates (date-only)")
 
     refs = get_referees()
