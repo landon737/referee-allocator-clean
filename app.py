@@ -3482,7 +3482,18 @@ with tabs[2]:
     st.markdown("### Blackouts CSV (optional)")
     st.caption("Required columns: email, blackout_date")
 
-    bl_file = st.file_uploader("Upload Blackouts CSV", type=["csv"]()
+    bl_file = st.file_uploader("Upload Blackouts CSV", type=["csv"], key="bl_csv")
+    if bl_file:
+        df_bl = pd.read_csv(bl_file)
+        st.dataframe(df_bl.head(20), use_container_width=True)
+
+        if st.button("Import Blackouts", key="import_bl_btn"):
+            try:
+                added, skipped = import_blackouts_csv(df_bl)
+                st.success(f"Imported blackouts. Added: {added}. Skipped (unknown referee): {skipped}")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
 
 
 # ============================================================
