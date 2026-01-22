@@ -264,13 +264,11 @@ def ensure_ladder_tables():
         conn.close()
 
 
-
 def init_db():
-    ensure_referees_phone_column()
-    ensure_ladder_tables()
     conn = db()
     cur = conn.cursor()
 
+    # --- Core tables first (must exist before migrations) ---
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS referees (
@@ -376,6 +374,10 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+    # --- Now safe migrations / add-on tables ---
+    ensure_referees_phone_column()
+    ensure_ladder_tables()
 
 
 # ============================================================
@@ -1083,6 +1085,42 @@ def import_blackouts_csv(df: pd.DataFrame):
     return added, skipped
 
 
+def list_all_blackouts_with_ref_names() -> pd.DataFrame:
+    """
+    Returns all blackout dates with referee names, sorted by date then name.
+    Inserts a blank row between dates for readability in the sidebar table.
+    """
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT
+            b.blackout_date AS blackout_date,
+            TRIM(r.name) AS referee
+        FROM blackouts b
+        JOIN referees r ON r.id = b.referee_id
+        ORDER BY b.blackout_date ASC, r.name ASC
+        """
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return pd.DataFrame(columns=["Date", "Referee"])
+
+    out = []
+    last_date = None
+    for r in rows:
+        d = (r["blackout_date"] or "").strip()
+        nm = (r["referee"] or "").strip()
+
+        if last_date is not None and d != last_date:
+            out.append({"Date": "", "Referee": ""})  # spacer row
+
+        out.append({"Date": d, "Referee": nm})
+        last_date = d
+
+    return pd.DataFrame(out)
+
+
 def get_games():
     conn = db()
     rows = conn.execute(
@@ -1108,92 +1146,6 @@ def get_referees():
     ).fetchall()
     conn.close()
     return rows
-
-
-with tabs[3]:
-    st.subheader("Manage Blackout Dates (date-only)")
-
-    refs = get_referees()
-    if not refs:
-        st.info("Import referees first.")
-        st.stop()
-
-    left_col, right_col = st.columns([2, 1], gap="large")
-
-    # ----------------------------
-    # LEFT: existing add/remove UI
-    # ----------------------------
-    with left_col:
-        ref_map = {f"{r['name']} ({r['email']})": r["id"] for r in refs}
-        choice = st.selectbox("Select referee", list(ref_map.keys()), key="blackout_ref_select")
-        ref_id = ref_map[choice]
-
-        add_date = st.date_input("Add blackout date", value=date.today(), key="blackout_add_date")
-        if st.button("Add date", key="blackout_add_btn"):
-            conn = db()
-            try:
-                conn.execute(
-                    "INSERT INTO blackouts(referee_id, blackout_date) VALUES (?, ?)",
-                    (ref_id, add_date.isoformat()),
-                )
-                conn.commit()
-                st.success("Added blackout date.")
-                st.rerun()
-            except sqlite3.IntegrityError:
-                st.warning("That date is already in the blackout list.")
-            finally:
-                conn.close()
-
-        st.markdown("### Current blackout dates (selected referee)")
-        conn = db()
-        rows = conn.execute(
-            """
-            SELECT blackout_date FROM blackouts
-            WHERE referee_id=?
-            ORDER BY blackout_date ASC
-            """,
-            (ref_id,),
-        ).fetchall()
-        conn.close()
-
-        if rows:
-            dates = [r["blackout_date"] for r in rows]
-            del_date = st.selectbox("Remove blackout date", dates, key="blackout_del_select")
-            if st.button("Remove selected date", key="blackout_del_btn"):
-                conn = db()
-                conn.execute(
-                    "DELETE FROM blackouts WHERE referee_id=? AND blackout_date=?",
-                    (ref_id, del_date),
-                )
-                conn.commit()
-                conn.close()
-                st.success("Removed.")
-                st.rerun()
-        else:
-            st.caption("No blackout dates set for this referee.")
-
-    # ----------------------------
-    # RIGHT: ALL blackouts table
-    # ----------------------------
-    with right_col:
-        st.markdown("### All blackout dates")
-        st.caption("Sorted by date (blank row between dates)")
-
-        df_all = list_all_blackouts_with_ref_names()
-
-        if df_all.empty:
-            st.caption("No blackout dates in the system.")
-        else:
-            # Set a reasonable height so it feels like a sidebar table
-            row_h = 32
-            height = min(900, (len(df_all) + 1) * row_h + 10)
-
-            st.dataframe(
-                df_all,
-                use_container_width=True,
-                hide_index=True,
-                height=height,
-            )
 
 
 def get_assignments_for_game(game_id: int):
@@ -2776,7 +2728,8 @@ with tabs[0]:
 
         not_accepted_names = list_referees_not_accepted_for_window(week_start, week_end_excl)
 
-        c_bar, c_list = st.columns([1, 2], vertical_alignment="center")
+        c_bar, c_list = st.columns([1, 2])
+
 
         with c_bar:
             height_px = 24
@@ -3373,7 +3326,8 @@ with tabs[1]:
 
             st.markdown("")
 
-            if st.button("Save result", key=f"save_res_{g['id']}_ladder"):
+            save_key = f"save_res_{g['id']}_ladder"
+            if st.button("Save result", key=save_key):
                 if home_defaulted and away_defaulted:
                     st.error("Cannot save: only one team can be marked as DEFAULTED.")
                 else:
@@ -3393,25 +3347,6 @@ with tabs[1]:
                     st.success("Saved.")
                     st.rerun()
 
-
-                if home_defaulted and away_defaulted:
-                    st.error("Cannot save: only one team can be marked as DEFAULTED.")
-                else:
-                    upsert_game_result(
-                        game_id=int(g["id"]),
-                        home_score=int(home_score),
-                        away_score=int(away_score),
-                        home_female_tries=int(home_ft),
-                        away_female_tries=int(away_ft),
-                        home_conduct=int(home_conduct),
-                        away_conduct=int(away_conduct),
-                        home_unstripped=int(home_un),
-                        away_unstripped=int(away_un),
-                        home_defaulted=1 if home_defaulted else 0,
-                        away_defaulted=1 if away_defaulted else 0,
-                    )
-                    st.success("Saved.")
-                    st.rerun()
 
     st.markdown("---")
     st.markdown("### 3) Ladder + audit (fault finding)")
@@ -3668,59 +3603,6 @@ with tabs[3]:
                 hide_index=True,
                 height=height,
             )
-
-    st.subheader("Manage Blackout Dates (date-only)")
-
-    refs = get_referees()
-    if not refs:
-        st.info("Import referees first.")
-    else:
-        ref_map = {f"{r['name']} ({r['email']})": r["id"] for r in refs}
-        choice = st.selectbox("Select referee", list(ref_map.keys()), key="blackout_ref_select")
-        ref_id = ref_map[choice]
-
-        add_date = st.date_input("Add blackout date", value=date.today(), key="blackout_add_date")
-        if st.button("Add date", key="blackout_add_btn"):
-            conn = db()
-            try:
-                conn.execute(
-                    "INSERT INTO blackouts(referee_id, blackout_date) VALUES (?, ?)",
-                    (ref_id, add_date.isoformat()),
-                )
-                conn.commit()
-                st.success("Added blackout date.")
-            except sqlite3.IntegrityError:
-                st.warning("That date is already in the blackout list.")
-            finally:
-                conn.close()
-
-        st.markdown("### Current blackout dates")
-        conn = db()
-        rows = conn.execute(
-            """
-            SELECT blackout_date FROM blackouts
-            WHERE referee_id=?
-            ORDER BY blackout_date ASC
-            """,
-            (ref_id,),
-        ).fetchall()
-        conn.close()
-
-        if rows:
-            dates = [r["blackout_date"] for r in rows]
-            del_date = st.selectbox("Remove blackout date", dates, key="blackout_del_select")
-            if st.button("Remove selected date", key="blackout_del_btn"):
-                conn = db()
-                conn.execute(
-                    "DELETE FROM blackouts WHERE referee_id=? AND blackout_date=?",
-                    (ref_id, del_date),
-                )
-                conn.commit()
-                conn.close()
-                st.success("Removed.")
-                st.rerun()
-        else:
-            st.caption("No blackout dates set.")
 
 # ============================================================
 # Administrators tab
