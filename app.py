@@ -2460,6 +2460,188 @@ def build_admin_summary_xlsx_bytes(selected_date: date) -> bytes:
 # ============================================================
 # Offers
 # ============================================================
+# ============================================================
+# Offers (bulk helpers)
+# ============================================================
+
+def _offers_for_date_rows(selected_date: date) -> list[sqlite3.Row]:
+    """
+    Returns all assignment slots for games on selected_date, including referee + game details.
+    """
+    start_min = datetime.combine(selected_date, datetime.min.time()).isoformat(timespec="seconds")
+    start_max = datetime.combine(selected_date + timedelta(days=1), datetime.min.time()).isoformat(timespec="seconds")
+
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT
+            a.id AS assignment_id,
+            a.status AS status,
+            a.referee_id AS referee_id,
+
+            r.name  AS ref_name,
+            r.email AS ref_email,
+
+            g.id AS game_id,
+            g.home_team,
+            g.away_team,
+            g.field_name,
+            g.start_dt
+        FROM games g
+        JOIN assignments a ON a.game_id = g.id
+        LEFT JOIN referees r ON r.id = a.referee_id
+        WHERE g.start_dt >= ? AND g.start_dt < ?
+        ORDER BY g.start_dt ASC, g.field_name ASC, g.home_team ASC, a.slot_no ASC
+        """,
+        (start_min, start_max),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def count_bulk_offer_candidates(selected_date: date) -> dict:
+    """
+    Counts what would happen if we ran bulk-offer for the selected date.
+    """
+    rows = _offers_for_date_rows(selected_date)
+
+    counts = {
+        "candidates": 0,
+        "skipped_no_ref": 0,
+        "skipped_blackout": 0,
+        "skipped_already_offered": 0,
+        "skipped_confirmed": 0,
+        "skipped_other": 0,
+    }
+
+    for r in rows:
+        status = (r["status"] or "").strip().upper()
+        ref_id = r["referee_id"]
+
+        if ref_id is None:
+            counts["skipped_no_ref"] += 1
+            continue
+
+        if status in ("ACCEPTED", "ASSIGNED"):
+            counts["skipped_confirmed"] += 1
+            continue
+
+        if status == "OFFERED":
+            counts["skipped_already_offered"] += 1
+            continue
+
+        # We only bulk-send for NOT_OFFERED (your “pre-allocated but not sent yet” state)
+        if status != "NOT_OFFERED":
+            counts["skipped_other"] += 1
+            continue
+
+        gdate = dtparser.parse(r["start_dt"]).date()
+        if referee_has_blackout(int(ref_id), gdate):
+            counts["skipped_blackout"] += 1
+            continue
+
+        counts["candidates"] += 1
+
+    return counts
+
+
+def send_bulk_offers_for_date(selected_date: date) -> dict:
+    """
+    Sends offers for ALL NOT_OFFERED assignments on selected_date (skipping blackouts/confirmed/already offered).
+    Returns a summary dict (sent / skipped / failed).
+    """
+    rows = _offers_for_date_rows(selected_date)
+
+    summary = {
+        "sent": 0,
+        "failed": 0,
+        "skipped_no_ref": 0,
+        "skipped_blackout": 0,
+        "skipped_already_offered": 0,
+        "skipped_confirmed": 0,
+        "skipped_other": 0,
+        "failures": [],  # list of strings
+    }
+
+    for r in rows:
+        assignment_id = int(r["assignment_id"])
+        status = (r["status"] or "").strip().upper()
+        ref_id = r["referee_id"]
+
+        if ref_id is None:
+            summary["skipped_no_ref"] += 1
+            continue
+
+        if status in ("ACCEPTED", "ASSIGNED"):
+            summary["skipped_confirmed"] += 1
+            continue
+
+        if status == "OFFERED":
+            summary["skipped_already_offered"] += 1
+            continue
+
+        if status != "NOT_OFFERED":
+            summary["skipped_other"] += 1
+            continue
+
+        g_start_dt = dtparser.parse(r["start_dt"])
+        gdate = g_start_dt.date()
+
+        if referee_has_blackout(int(ref_id), gdate):
+            summary["skipped_blackout"] += 1
+            continue
+
+        # Build a game dict compatible with send_offer_email_and_mark_offered()
+        game_row = {
+            "home_team": r["home_team"],
+            "away_team": r["away_team"],
+            "field_name": r["field_name"],
+        }
+
+        referee_name = (r["ref_name"] or "").strip() or "Referee"
+        referee_email = (r["ref_email"] or "").strip()
+
+        if not referee_email:
+            summary["failed"] += 1
+            summary["failures"].append(
+                f"{referee_name} — missing email (assignment_id={assignment_id})"
+            )
+            continue
+
+        # IMPORTANT: avoid multiple live tokens for the same assignment
+        # If an offer already exists (e.g. admin clicked earlier then changed mind),
+        # clear any old ones before creating a new offer token.
+        conn = db()
+        try:
+            _delete_offers_for_assignment(conn, assignment_id)
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Use your existing sending logic (creates offer token, emails, marks OFFERED, rolls back token on failure)
+        msg_key = f"bulk_offer_msg_{assignment_id}"
+        send_offer_email_and_mark_offered(
+            assignment_id=assignment_id,
+            referee_name=referee_name,
+            referee_email=referee_email,
+            game=game_row,
+            start_dt=g_start_dt,
+            msg_key=msg_key,
+        )
+
+        # Determine success/fail from the msg_key that function sets
+        msg = st.session_state.get(msg_key, "")
+        if msg.startswith("Offer emailed successfully"):
+            summary["sent"] += 1
+        else:
+            summary["failed"] += 1
+            summary["failures"].append(
+                f"{referee_name} — {r['home_team']} vs {r['away_team']} @ {r['field_name']} — {msg}"
+            )
+
+    return summary
+
+
 def create_offer(assignment_id: int) -> str:
     token = secrets.token_urlsafe(24)
     conn = db()
@@ -2953,9 +3135,61 @@ with tabs[0]:
 
     selected_date = date_label_to_date[selected_label]
 
+    date_key = selected_date.isoformat()
+
+
     # Keep scroll position stable across auto-refresh/reruns (per selected date)
     preserve_scroll(scroll_key=f"refalloc_admin_scroll_{selected_date.isoformat()}")
 
+    # ------------------------------------------------------------
+    # BULK OFFERS — push all NOT_OFFERED slots for this date
+    # ------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Bulk offers")
+
+    bulk_counts = count_bulk_offer_candidates(selected_date)
+
+    c_bulk1, c_bulk2 = st.columns([2, 1], gap="large")
+
+    with c_bulk1:
+        st.caption(
+            f"Candidates to send now: {bulk_counts['candidates']}  •  "
+            f"Skipped: blackout={bulk_counts['skipped_blackout']}, "
+            f"already offered={bulk_counts['skipped_already_offered']}, "
+            f"confirmed={bulk_counts['skipped_confirmed']}"
+        )
+
+        confirm_bulk = st.checkbox(
+            "Yes — send OFFERS for ALL candidates on this date",
+            value=False,
+            key=f"confirm_bulk_offers_{selected_date.isoformat()}",
+        )
+
+        if st.button(
+            "Send OFFERS for all games on this date",
+            key=f"send_bulk_offers_btn_{selected_date.isoformat()}",
+            disabled=(not confirm_bulk or bulk_counts["candidates"] == 0),
+        ):
+            result = send_bulk_offers_for_date(selected_date)
+            st.session_state[f"bulk_offer_result_{selected_date.isoformat()}"] = result
+            st.rerun()
+
+    with c_bulk2:
+        res = st.session_state.get(f"bulk_offer_result_{selected_date.isoformat()}")
+        if res:
+            status_badge(f"Sent: {res['sent']}", bg="#2e7d32")
+            st.caption(
+                f"Failed: {res['failed']} • "
+                f"Skipped: blackout={res['skipped_blackout']}, "
+                f"already offered={res['skipped_already_offered']}, "
+                f"confirmed={res['skipped_confirmed']}"
+            )
+            if res.get("failures"):
+                with st.expander("Show failures"):
+                    for f in res["failures"][:50]:
+                        st.write(f"- {f}")
+                    if len(res["failures"]) > 50:
+                        st.caption(f"(Showing first 50 of {len(res['failures'])})")
 
     count_games = sum(1 for g in games if game_local_date(g) == selected_date)
     st.caption(f"{count_games} game(s) on {selected_date.isoformat()}")
@@ -3051,79 +3285,84 @@ with tabs[0]:
 
         c_pdf1, c_pdf2, c_x1, c_x2, c_pdf3, c_pdf4 = st.columns([1, 2, 1, 2, 1, 2])
 
+        date_key = selected_date.isoformat()
+
+        # =========================
+        # SUMMARY PDF
+        # =========================
         with c_pdf1:
-            if st.button("Build Summary PDF", key="build_pdf_btn"):
+            if st.button("Build Summary PDF", key=f"build_pdf_btn_{date_key}"):
                 try:
                     pdf_bytes = build_admin_summary_pdf_bytes(selected_date)
-                    st.session_state["admin_summary_pdf_bytes"] = pdf_bytes
+                    st.session_state[f"admin_summary_pdf_bytes_{date_key}"] = pdf_bytes
                     st.success("Summary PDF built.")
                 except Exception as e:
                     st.error(f"Failed to build Summary PDF: {e}")
 
         with c_pdf2:
-            pdf_bytes = st.session_state.get("admin_summary_pdf_bytes")
+            pdf_bytes = st.session_state.get(f"admin_summary_pdf_bytes_{date_key}")
             if pdf_bytes:
-                filename = f"game_summary_{selected_date.isoformat()}.pdf"
                 st.download_button(
-                    label="Download Summary PDF",
+                    "Download Summary PDF",
                     data=pdf_bytes,
-                    file_name=filename,
+                    file_name=f"game_summary_{date_key}.pdf",
                     mime="application/pdf",
-                    key="download_pdf_btn",
+                    key=f"download_pdf_btn_{date_key}",
                 )
             else:
-                st.caption("Click **Build Summary PDF** to generate the printable schedule.")
+                st.caption("Click **Build Summary PDF** first.")
 
+        # =========================
+        # SUMMARY XLSX
+        # =========================
         with c_x1:
-            if st.button("Build Summary XLSX", key="build_xlsx_btn"):
+            if st.button("Build Summary XLSX", key=f"build_xlsx_btn_{date_key}"):
                 try:
                     xlsx_bytes = build_admin_summary_xlsx_bytes(selected_date)
-                    st.session_state["admin_summary_xlsx_bytes"] = xlsx_bytes
+                    st.session_state[f"admin_summary_xlsx_bytes_{date_key}"] = xlsx_bytes
                     st.success("Summary XLSX built.")
                 except Exception as e:
                     st.error(f"Failed to build Summary XLSX: {e}")
 
         with c_x2:
-            xlsx_bytes = st.session_state.get("admin_summary_xlsx_bytes")
+            xlsx_bytes = st.session_state.get(f"admin_summary_xlsx_bytes_{date_key}")
             if xlsx_bytes:
-                filename = f"game_summary_{selected_date.isoformat()}.xlsx"
-
                 st.download_button(
-                    label="Download for Excel / Google Sheets",
+                    "Download for Excel / Google Sheets",
                     data=xlsx_bytes,
-                    file_name=filename,
+                    file_name=f"game_summary_{date_key}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_xlsx_btn",
+                    key=f"download_xlsx_btn_{date_key}",
                 )
-
-                st.caption(
-                    "Tip: Upload this file to Google Sheets — it opens natively with full formatting."
-                )
+                st.caption("Tip: Upload to Google Sheets — opens natively.")
             else:
                 st.caption("Click **Build Summary XLSX** first.")
 
+        # =========================
+        # SCORECARDS PDF
+        # =========================
         with c_pdf3:
-            if st.button("Build Referee Scorecards", key="build_scorecards_btn"):
+            if st.button("Build Referee Scorecards", key=f"build_scorecards_btn_{date_key}"):
                 try:
-                    pdf_bytes = build_referee_scorecards_pdf_bytes(selected_date)
-                    st.session_state["ref_scorecards_pdf_bytes"] = pdf_bytes
+                    sc_bytes = build_referee_scorecards_pdf_bytes(selected_date)
+                    st.session_state[f"ref_scorecards_pdf_bytes_{date_key}"] = sc_bytes
                     st.success("Scorecards PDF built.")
                 except Exception as e:
                     st.error(f"Failed to build Scorecards PDF: {e}")
 
         with c_pdf4:
-            pdf_bytes = st.session_state.get("ref_scorecards_pdf_bytes")
-            if pdf_bytes:
-                filename = f"referee_scorecards_{selected_date.isoformat()}.pdf"
+            sc_bytes = st.session_state.get(f"ref_scorecards_pdf_bytes_{date_key}")
+            if sc_bytes:
                 st.download_button(
-                    label="Download Scorecards PDF",
-                    data=pdf_bytes,
-                    file_name=filename,
+                    "Download Scorecards PDF",
+                    data=sc_bytes,
+                    file_name=f"referee_scorecards_{date_key}.pdf",
                     mime="application/pdf",
-                    key="download_scorecards_btn",
+                    key=f"download_scorecards_btn_{date_key}",
                 )
             else:
-                st.caption("Click **Build Referee Scorecards** to generate the 6-up scorecards.")
+                st.caption("Click **Build Referee Scorecards** first.")
+
 
         for g in games:
             if game_local_date(g) != selected_date:
