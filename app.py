@@ -2804,85 +2804,62 @@ if admin_count() == 0:
         else:
             add_admin(first_email)
             st.success("First admin created. Now request a login link below.")
-    st.markdown("---")
+    st.stop()
 
 # Login screen
 if not st.session_state.get("admin_email"):
     st.subheader("Admin Login")
-    st.write("Enter your email to receive a one-time login link (15 minutes).")
+    st.write("Enter your email to log in.")
+
     email = st.text_input("Admin email", key="login_email")
-    
+    typed_email = (email or "").strip().lower()
+
     # ------------------------------------------------------------
-    # BYPASS LOGIN (no email / no tokens) for allow-listed admins
-    # Controlled by Render env var: ADMIN_OVERRIDE_EMAILS
-    # Super admin does NOT bypass (keeps token/email workflow)
+    # SIMPLE BYPASS LOGIN
+    # Normal admins: instant login if in admin allowlist
+    # Super admin: must use email/token
     # ------------------------------------------------------------
-    typed = (email or "").strip().lower()
-    if typed and (not is_super_admin_email(typed)) and (typed in bypass_allowlist_emails()):
+    if typed_email and (not is_super_admin_email(typed_email)) and is_admin_email_allowed(typed_email):
         st.success("Recognised administrator — logging you in...")
-        st.session_state["admin_email"] = typed
+        st.session_state["admin_email"] = typed_email
         st.rerun()
 
-    # ------------------------------------------------------------
-    # Bypass login for normal admins (no email / no token)
-    # If their email is an active admin in the allowlist,
-    # log them in immediately.
-    #
-    # Super admin (landon737@gmail.com) does NOT bypass and
-    # keeps token/email login.
-    # ------------------------------------------------------------
-    if email and not is_super_admin_email(email) and is_admin_email_allowed(email):
-        st.success("Recognised administrator — logging you in...")
-        st.session_state["admin_email"] = email.strip().lower()
-        st.rerun()
+    st.markdown("---")
 
     # ------------------------------------------------------------
-    # BYPASS LOGIN (no email / no tokens) for allow-listed admins
-    # Controlled by Render env var ADMIN_OVERRIDE_EMAILS
+    # Super Admin login (email token)
     # ------------------------------------------------------------
-    if can_bypass_login(email):
-        st.success("Recognised admin email — logging you in...")
-        st.session_state["admin_email"] = email.strip().lower()
-        st.rerun()
-
-    if st.button("Send login link", key="send_login_link_btn"):
+    if is_super_admin_email(typed_email):
+        st.info("Super admin — use login link.")
         if st.button("Send login link", key="send_login_link_btn"):
-            if not email.strip():
-                st.error("Please enter an email.")
-            elif not is_admin_email_allowed(email):
-                st.error("That email is not an authorised administrator.")
-            else:
-                try:
-                    send_admin_login_email(email)
-                    st.success("Login link sent. Check your email.")
-                except Exception as e:
-                    st.error(str(e))
+            try:
+                send_admin_login_email(typed_email)
+                st.success("Login link sent. Check your email.")
+            except Exception as e:
+                st.error(str(e))
+    else:
+        st.caption("If you can’t log in, ask Landon to add you as admin.")
 
     # ------------------------------------------------------------
-    # Emergency / DEV: show admin login link on screen (no email)
-    # Enable by setting environment variable:
-    #   SHOW_ADMIN_LINK = "true"
+    # Emergency Admin Link (optional)
     # ------------------------------------------------------------
     if os.getenv("SHOW_ADMIN_LINK", "false").lower() == "true":
         st.markdown("---")
-        st.subheader("Emergency Admin Link (no email)")
+        st.subheader("Emergency Admin Link")
 
-        if st.button("Generate admin login link (display here)", key="show_admin_link_btn"):
-            if not email.strip():
-                st.error("Please enter an email above first.")
-            elif not is_admin_email_allowed(email):
-                st.error("That email is not an authorised administrator.")
+        if st.button("Generate admin login link", key="show_admin_link_btn"):
+            if not typed_email:
+                st.error("Enter email first.")
+            elif not is_admin_email_allowed(typed_email):
+                st.error("Not an authorised admin.")
             else:
                 cfg = smtp_settings()
                 base = (cfg.get("app_base_url") or "").rstrip("/")
-                if not base:
-                    st.error("APP_BASE_URL is missing. Set it in Render environment variables.")
-                else:
-                    token = create_admin_login_token(email.strip().lower(), minutes_valid=15)
-                    login_url = f"{base}/?admin_login=1&token={token}"
-                    st.success("Login link generated (valid 15 minutes):")
-                    st.code(login_url)
-                    st.caption("Open that link in a new tab to log in.")
+                token = create_admin_login_token(typed_email, minutes_valid=15)
+                login_url = f"{base}/?admin_login=1&token={token}"
+                st.code(login_url)
+
+    st.stop()
 
 
     # ------------------------------------------------------------
