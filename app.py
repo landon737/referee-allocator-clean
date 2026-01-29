@@ -2916,7 +2916,8 @@ with tabs[0]:
         all_dates,
         index=default_idx,
         format_func=lambda d: d.strftime("%d-%b-%y"),
-        )
+        key="admin_show_games_for_date",
+    )
 
     # Keep scroll position stable across auto-refresh/reruns (per selected date)
     preserve_scroll(scroll_key=f"refalloc_admin_scroll_{selected_date.isoformat()}")
