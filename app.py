@@ -11,31 +11,23 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
-# ============================
-# Admin auth: simple bypass
-# ============================
+from pathlib import Path
+from datetime import datetime, date, timedelta, timezone
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-SUPER_ADMIN_EMAIL = "landon737@gmail.com"
+import pandas as pd
+import streamlit as st
+from dateutil import parser as dtparser
+from streamlit_autorefresh import st_autorefresh
 
-def _parse_csv_emails(v: str) -> set[str]:
-    return {e.strip().lower() for e in (v or "").split(",") if e.strip()}
-
-def bypass_admin_emails() -> set[str]:
-    # Render env var: ADMIN_OVERRIDE_EMAILS="a@b.com,c@d.com"
-    return _parse_csv_emails(os.getenv("ADMIN_OVERRIDE_EMAILS", ""))
-
-def can_bypass_login(email: str) -> bool:
-    e = (email or "").strip().lower()
-    if not e:
-        return False
-    # Super admin does NOT bypass (keeps token/email workflow)
-    if e == SUPER_ADMIN_EMAIL:
-        return False
-    return e in bypass_admin_emails()
-
-def is_super_admin_logged_in() -> bool:
-    return (st.session_state.get("admin_email", "").strip().lower() == SUPER_ADMIN_EMAIL)
-
+# PDF (ReportLab)
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import mm
 
 def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
     """
@@ -106,37 +98,6 @@ def is_super_admin_logged_in() -> bool:
 def is_super_admin_email(email: str) -> bool:
     return (email or "").strip().lower() == SUPER_ADMIN_EMAIL
 
-
-from pathlib import Path
-from datetime import datetime, date, timedelta, timezone
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-
-import pandas as pd
-import streamlit as st
-from dateutil import parser as dtparser
-from streamlit_autorefresh import st_autorefresh
-
-# PDF (ReportLab)
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm
-
-def invalidate_ladder():
-    """
-    Force Streamlit to recompute ladder tables after saving a result.
-    Works whether you use @st.cache_data or not.
-    """
-    try:
-        st.cache_data.clear()   # clears any cached ladder/audit functions
-    except Exception:
-        pass
-
-    # a "nonce" that changes each save, so ladder block re-runs deterministically
-    st.session_state["ladder_nonce"] = str(datetime.now().timestamp())
 
 # ============================================================
 # CONFIG
@@ -217,6 +178,18 @@ def status_badge(text: str, bg: str, fg: str = "white"):
 
 def _time_12h(dt: datetime) -> str:
     return dt.strftime("%I:%M %p").lstrip("0")
+
+def invalidate_ladder() -> None:
+    """
+    Force Streamlit to recompute ladder tables after saving a result.
+    Works whether you use @st.cache_data or not.
+    """
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+    st.session_state["ladder_nonce"] = str(datetime.now(timezone.utc).timestamp())
 
 
 # ============================================================
@@ -2839,7 +2812,18 @@ if not st.session_state.get("admin_email"):
     st.write("Enter your email to receive a one-time login link (15 minutes).")
     email = st.text_input("Admin email", key="login_email")
     
-        # ------------------------------------------------------------
+    # ------------------------------------------------------------
+    # BYPASS LOGIN (no email / no tokens) for allow-listed admins
+    # Controlled by Render env var: ADMIN_OVERRIDE_EMAILS
+    # Super admin does NOT bypass (keeps token/email workflow)
+    # ------------------------------------------------------------
+    typed = (email or "").strip().lower()
+    if typed and (not is_super_admin_email(typed)) and (typed in bypass_allowlist_emails()):
+        st.success("Recognised administrator — logging you in...")
+        st.session_state["admin_email"] = typed
+        st.rerun()
+
+    # ------------------------------------------------------------
     # Bypass login for normal admins (no email / no token)
     # If their email is an active admin in the allowlist,
     # log them in immediately.
