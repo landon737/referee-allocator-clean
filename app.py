@@ -94,6 +94,19 @@ def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
         width=0,
     )
 
+# ============================
+# Admin auth helpers
+# ============================
+
+SUPER_ADMIN_EMAIL = "landon737@gmail.com"
+
+def is_super_admin_logged_in() -> bool:
+    return (st.session_state.get("admin_email", "").strip().lower() == SUPER_ADMIN_EMAIL)
+
+def is_super_admin_email(email: str) -> bool:
+    return (email or "").strip().lower() == SUPER_ADMIN_EMAIL
+
+
 from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
 from email.mime.text import MIMEText
@@ -2826,6 +2839,19 @@ if not st.session_state.get("admin_email"):
     st.write("Enter your email to receive a one-time login link (15 minutes).")
     email = st.text_input("Admin email", key="login_email")
     
+        # ------------------------------------------------------------
+    # Bypass login for normal admins (no email / no token)
+    # If their email is an active admin in the allowlist,
+    # log them in immediately.
+    #
+    # Super admin (landon737@gmail.com) does NOT bypass and
+    # keeps token/email login.
+    # ------------------------------------------------------------
+    if email and not is_super_admin_email(email) and is_admin_email_allowed(email):
+        st.success("Recognised administrator — logging you in...")
+        st.session_state["admin_email"] = email.strip().lower()
+        st.rerun()
+
     # ------------------------------------------------------------
     # BYPASS LOGIN (no email / no tokens) for allow-listed admins
     # Controlled by Render env var ADMIN_OVERRIDE_EMAILS
@@ -2836,6 +2862,7 @@ if not st.session_state.get("admin_email"):
         st.rerun()
 
     if st.button("Send login link", key="send_login_link_btn"):
+        if st.button("Send login link", key="send_login_link_btn"):
         if not email.strip():
             st.error("Please enter an email.")
         elif not is_admin_email_allowed(email):
