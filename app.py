@@ -11,6 +11,31 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
+# ============================
+# Admin auth: simple bypass
+# ============================
+
+SUPER_ADMIN_EMAIL = "landon737@gmail.com"
+
+def _parse_csv_emails(v: str) -> set[str]:
+    return {e.strip().lower() for e in (v or "").split(",") if e.strip()}
+
+def bypass_admin_emails() -> set[str]:
+    # Render env var: ADMIN_OVERRIDE_EMAILS="a@b.com,c@d.com"
+    return _parse_csv_emails(os.getenv("ADMIN_OVERRIDE_EMAILS", ""))
+
+def can_bypass_login(email: str) -> bool:
+    e = (email or "").strip().lower()
+    if not e:
+        return False
+    # Super admin does NOT bypass (keeps token/email workflow)
+    if e == SUPER_ADMIN_EMAIL:
+        return False
+    return e in bypass_admin_emails()
+
+def is_super_admin_logged_in() -> bool:
+    return (st.session_state.get("admin_email", "").strip().lower() == SUPER_ADMIN_EMAIL)
+
 
 def preserve_scroll(scroll_key: str = "refalloc_admin_scroll"):
     """
@@ -2800,6 +2825,15 @@ if not st.session_state.get("admin_email"):
     st.subheader("Admin Login")
     st.write("Enter your email to receive a one-time login link (15 minutes).")
     email = st.text_input("Admin email", key="login_email")
+    
+    # ------------------------------------------------------------
+    # BYPASS LOGIN (no email / no tokens) for allow-listed admins
+    # Controlled by Render env var ADMIN_OVERRIDE_EMAILS
+    # ------------------------------------------------------------
+    if can_bypass_login(email):
+        st.success("Recognised admin email — logging you in...")
+        st.session_state["admin_email"] = email.strip().lower()
+        st.rerun()
 
     if st.button("Send login link", key="send_login_link_btn"):
         if not email.strip():
@@ -2911,13 +2945,25 @@ with tabs[0]:
             default_idx = i
             break
 
-    selected_date = st.selectbox(
+    # ------------------------------------------------------------
+    # Show games for date (display as dd-MMM-yy)
+    # NOTE: Streamlit sometimes shows date objects as YYYY-MM-DD
+    # when the selectbox is collapsed, even with format_func.
+    # So we use string labels and map back to date objects.
+    # ------------------------------------------------------------
+    date_label_to_date = {d.strftime("%d-%b-%y"): d for d in all_dates}
+    date_labels = list(date_label_to_date.keys())
+
+    default_label = all_dates[default_idx].strftime("%d-%b-%y")
+
+    selected_label = st.selectbox(
         "Show games for date",
-        all_dates,
-        index=default_idx,
-        format_func=lambda d: d.strftime("%d-%b-%y"),
+        date_labels,
+        index=date_labels.index(default_label),
         key="admin_show_games_for_date",
     )
+
+    selected_date = date_label_to_date[selected_label]
 
     # Keep scroll position stable across auto-refresh/reruns (per selected date)
     preserve_scroll(scroll_key=f"refalloc_admin_scroll_{selected_date.isoformat()}")
@@ -4094,6 +4140,11 @@ with tabs[3]:
 with tabs[4]:
     st.subheader("Administrators (allowlist)")
     st.caption("Add/remove admins by email. Removed admins lose access immediately.")
+
+    # Only Super Admin can manage administrators
+    if not is_super_admin_logged_in():
+        st.info("Only the Super Admin can manage administrators.")
+        st.stop()
 
     admins = list_admins()
     if admins:
