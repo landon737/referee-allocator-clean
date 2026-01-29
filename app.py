@@ -131,9 +131,7 @@ def game_local_date(game_row) -> date:
     Returns the local calendar date for a game row.
     Expects game_row to have 'start_dt' (ISO string).
     """
-    s = (game_row.get("start_dt") or "").strip()
-    if not s:
-        return date.min  # or raise ValueError("Missing start_dt")
+    s = (game_row["start_dt"] or "").strip()
 
     # Accept both "YYYY-MM-DD HH:MM" and ISO "YYYY-MM-DDTHH:MM:SS"
     s = s.replace(" ", "T")
