@@ -21,6 +21,21 @@ from email.mime.multipart import MIMEMultipart
 
 import pandas as pd
 
+# ============================
+# Date helpers (Render-safe)
+# ============================
+import calendar
+from zoneinfo import ZoneInfo
+
+NZ_TZ = ZoneInfo("Pacific/Auckland")
+
+def nz_today() -> date:
+    return datetime.now(NZ_TZ).date()
+
+def fmt_dd_MMM_yy(d: date) -> str:
+    # Locale-independent month abbreviations
+    return f"{d.day:02d}-{calendar.month_abbr[d.month]}-{d.year % 100:02d}"
+
 from dateutil import parser as dtparser
 from streamlit_autorefresh import st_autorefresh
 
