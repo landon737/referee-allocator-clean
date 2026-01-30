@@ -139,6 +139,28 @@ def game_local_date(game_row) -> date:
     dt = dtparser.isoparse(s)
     return dt.date()
 
+def parse_csv_date_strict(d_raw: str) -> date:
+    """
+    Parse a date string from CSV with ZERO ambiguity.
+    Accepts:
+      - YYYY-MM-DD   (preferred)
+      - DD/MM/YYYY   (common NZ)
+      - DD-MM-YYYY
+    """
+    s = (d_raw or "").strip()
+    if not s:
+        raise ValueError("Empty date")
+
+    # If pandas gave us "2026-02-04 00:00:00"
+    s = s.split(" ")[0]
+
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            pass
+
+    raise ValueError(f"Unrecognised date format: '{d_raw}' (expected YYYY-MM-DD or DD/MM/YYYY)")
 
 def referee_has_blackout(ref_id: int, d: date) -> bool:
     """
@@ -1071,7 +1093,13 @@ def import_games_csv(df: pd.DataFrame):
                 start_dt = dtparser.parse(f"{d_raw} {t_raw}")
             else:
                 start_raw = str(row[cols["start_datetime"]]).strip()
-                start_dt = dtparser.parse(start_raw)
+                d = parse_csv_date_strict(d_raw)
+
+                # parse time strictly-ish (handles "18:00" or "6:00 PM")
+                t = dtparser.parse(t_raw).time()
+
+                start_dt = datetime.combine(d, t)
+
         except Exception as e:
             raise ValueError(f"Could not parse date/time for game_id={game_key}: {e}")
 
@@ -1180,7 +1208,11 @@ def replace_games_csv(df: pd.DataFrame):
             if has_date_time:
                 d_raw = str(row[cols["date"]]).strip()
                 t_raw = str(row[cols["start_time"]]).strip()
-                start_dt = dtparser.parse(f"{d_raw} {t_raw}")
+                
+                d = parse_csv_date_strict(d_raw)
+                # parse time strictly-ish (handles "18:00" or "6:00 PM")
+                t = dtparser.parse(t_raw).time()
+                start_dt = datetime.combine(d, t)
             else:
                 start_raw = str(row[cols["start_datetime"]]).strip()
                 start_dt = dtparser.parse(start_raw)
@@ -3122,12 +3154,16 @@ with tabs[0]:
 
     # ------------------------------------------------------------
     # Show games for date (display as dd-MMM-yy)
-    # NOTE: Streamlit sometimes shows date objects as YYYY-MM-DD
-    # when the selectbox is collapsed, even with format_func.
-    # So we use string labels and map back to date objects.
+    # Use string labels and map back to date objects.
+    # Also: clear stale session_state values from older versions.
     # ------------------------------------------------------------
     date_label_to_date = {d.strftime("%d-%b-%y"): d for d in all_dates}
     date_labels = list(date_label_to_date.keys())
+
+    # ✅ clear stale old value (e.g. "2026-02-04") that is no longer a valid option
+    prev = st.session_state.get("admin_show_games_for_date")
+    if prev and prev not in date_labels:
+        st.session_state.pop("admin_show_games_for_date", None)
 
     default_label = all_dates[default_idx].strftime("%d-%b-%y")
 
@@ -3139,9 +3175,7 @@ with tabs[0]:
     )
 
     selected_date = date_label_to_date[selected_label]
-
     date_key = selected_date.isoformat()
-
 
     # Keep scroll position stable across auto-refresh/reruns (per selected date)
     preserve_scroll(scroll_key=f"refalloc_admin_scroll_{selected_date.isoformat()}")
