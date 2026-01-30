@@ -11,6 +11,9 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
+import os
+st.caption(f"BUILD: {os.getenv('RENDER_GIT_COMMIT', 'unknown')[:7]}")
+
 from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
 from email.mime.text import MIMEText
