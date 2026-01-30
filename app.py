@@ -5,14 +5,14 @@ import os
 import sqlite3
 import secrets
 import smtplib
-import streamlit.components.v1 as components
 from io import BytesIO
+
+import streamlit as st
+import streamlit.components.v1 as components
+
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
-
-import os
-st.caption(f"BUILD: {os.getenv('RENDER_GIT_COMMIT', 'unknown')[:7]}")
 
 from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
@@ -20,7 +20,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 import pandas as pd
-import streamlit as st
+
 from dateutil import parser as dtparser
 from streamlit_autorefresh import st_autorefresh
 
@@ -114,6 +114,8 @@ REF_PORTAL_ENABLED = os.getenv("REF_PORTAL_ENABLED", "false").lower() == "true"
 DEBUG_BANNER = os.getenv("DEBUG_BANNER", "false").lower() == "true"
 
 st.set_page_config(page_title="Referee Allocator (MVP)", layout="wide")
+
+st.caption(f"BUILD: {os.getenv('RENDER_GIT_COMMIT', 'unknown')[:7]}")
 
 if DEBUG_BANNER:
     st.warning("DEBUG: App reached top of script ✅")
