@@ -3135,12 +3135,16 @@ tabs = st.tabs(["Admin", "Ladder", "Import", "Blackouts", "Administrators"])
 with tabs[0]:
     st.subheader("Games & Assignments")
 
+    preserve_scroll(scroll_key="refalloc_admin_scroll_admin_tab")
+
     auto = st.toggle("Auto-refresh every 5 seconds", value=True, key="auto_refresh_toggle")
     if auto:
         st_autorefresh(interval=5000, key="auto_refresh_tick")
 
-    if st.button("Refresh status", key="refresh_status_btn"):
-        st.rerun()
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if st.button("Refresh status", key="refresh_status_btn"):
+            st.rerun()
 
     games = get_games()
     refs = get_referees()
@@ -3150,40 +3154,37 @@ with tabs[0]:
         st.stop()
 
     all_dates = sorted({game_local_date(g) for g in games})
-    today = date.today()
+    if not all_dates:
+        st.info("No game dates found.")
+        st.stop()
+
+    today = nz_today()
+
     default_idx = 0
     for i, d in enumerate(all_dates):
         if d >= today:
             default_idx = i
             break
+    else:
+        default_idx = max(0, len(all_dates) - 1)
 
-    # ------------------------------------------------------------
-    # Show games for date (display as dd-MMM-yy)
-    # Use string labels and map back to date objects.
-    # Also: clear stale session_state values from older versions.
-    # ------------------------------------------------------------
-    date_label_to_date = {d.strftime("%d-%b-%y"): d for d in all_dates}
-    date_labels = list(date_label_to_date.keys())
+    # ✅ Clear stale stored selection BEFORE creating the selectbox
+    prev = st.session_state.get("show_games_for_date_select")
+    if prev and prev not in all_dates:
+        st.session_state.pop("show_games_for_date_select", None)
 
-    # ✅ clear stale old value (e.g. "2026-02-04") that is no longer a valid option
-    prev = st.session_state.get("admin_show_games_for_date")
-    if prev and prev not in date_labels:
-        st.session_state.pop("admin_show_games_for_date", None)
-
-    default_label = all_dates[default_idx].strftime("%d-%b-%y")
-
-    selected_label = st.selectbox(
+    # ✅ ONE date selector only
+    selected_date = st.selectbox(
         "Show games for date",
-        date_labels,
-        index=date_labels.index(default_label),
-        key="admin_show_games_for_date",
+        all_dates,
+        index=default_idx,
+        format_func=fmt_dd_MMM_yy,
+        key="show_games_for_date_select",
     )
 
-    selected_date = date_label_to_date[selected_label]
-    date_key = selected_date.isoformat()
+    todays_games = [g for g in games if game_local_date(g) == selected_date]
+    st.caption(f"{len(todays_games)} game(s) on {fmt_dd_MMM_yy(selected_date)}")
 
-    # Keep scroll position stable across auto-refresh/reruns (per selected date)
-    preserve_scroll(scroll_key=f"refalloc_admin_scroll_{selected_date.isoformat()}")
 
     # ------------------------------------------------------------
     # BULK OFFERS — push all NOT_OFFERED slots for this date
