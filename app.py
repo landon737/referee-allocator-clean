@@ -37,6 +37,15 @@ def fmt_dd_MMM_yy(d: date) -> str:
     return f"{d.day:02d}-{calendar.month_abbr[d.month]}-{d.year % 100:02d}"
 
 from dateutil import parser as dtparser
+
+def parse_start_dt(s: str) -> datetime:
+    """
+    Parse the game's start_dt string reliably for NZ data.
+    IMPORTANT: NZ dates are day-first when numeric (dd/mm/yyyy).
+    """
+    return dtparser.parse(str(s), dayfirst=True)
+
+from dateutil import parser as dtparser
 from streamlit_autorefresh import st_autorefresh
 
 # PDF (ReportLab)
@@ -146,17 +155,8 @@ if DEBUG_BANNER:
 # ============================================================
 # Small utilities
 # ============================================================
-def game_local_date(game_row) -> date:
-    """
-    Returns the local calendar date for a game row.
-    Expects game_row to have 'start_dt' (ISO string).
-    """
-    s = (game_row["start_dt"] or "").strip()
-
-    # Accept both "YYYY-MM-DD HH:MM" and ISO "YYYY-MM-DDTHH:MM:SS"
-    s = s.replace(" ", "T")
-
-    dt = dtparser.isoparse(s)
+def game_local_date(g) -> date:
+    dt = parse_start_dt(g["start_dt"])
     return dt.date()
 
 def parse_csv_date_strict(d_raw: str) -> date:
@@ -1108,17 +1108,23 @@ def import_games_csv(df: pd.DataFrame):
 
         try:
             if has_date_time:
+                # --- DATE + TIME PROVIDED SEPARATELY ---
                 d_raw = str(row[cols["date"]]).strip()
                 t_raw = str(row[cols["start_time"]]).strip()
-                start_dt = dtparser.parse(f"{d_raw} {t_raw}")
-            else:
-                start_raw = str(row[cols["start_datetime"]]).strip()
-                d = parse_csv_date_strict(d_raw)
 
-                # parse time strictly-ish (handles "18:00" or "6:00 PM")
+                # Parse NZ-style date (DD/MM/YYYY)
+                d = dtparser.parse(d_raw, dayfirst=True).date()
+
+                # Parse time only (time has no locale ambiguity)
                 t = dtparser.parse(t_raw).time()
 
+                # Combine into one datetime
                 start_dt = datetime.combine(d, t)
+
+            else:
+                # --- FULL DATETIME PROVIDED ---
+                start_raw = str(row[cols["start_datetime"]]).strip()
+                start_dt = parse_start_dt(start_raw)
 
         except Exception as e:
             raise ValueError(f"Could not parse date/time for game_id={game_key}: {e}")
@@ -1173,7 +1179,7 @@ def replace_games_csv(df: pd.DataFrame):
     REPLACE mode: deletes ALL games (and dependent data) then imports the CSV as the new draw.
 
     What gets reset:
-      - offers (must be first; depends on assignments)
+      - offers (depends on assignments)
       - assignments
       - game_results (ladder scoring inputs)
       - games
@@ -1184,7 +1190,7 @@ def replace_games_csv(df: pd.DataFrame):
       - teams (divisions/opening balances)
       - admins/admin sessions/tokens
 
-    Returns: (imported_games_count)
+    Returns: imported_games_count (int)
     """
     cols = {c.lower().strip(): c for c in df.columns}
 
@@ -1226,16 +1232,24 @@ def replace_games_csv(df: pd.DataFrame):
 
         try:
             if has_date_time:
+                # --- DATE + TIME PROVIDED SEPARATELY ---
                 d_raw = str(row[cols["date"]]).strip()
                 t_raw = str(row[cols["start_time"]]).strip()
-                
-                d = parse_csv_date_strict(d_raw)
-                # parse time strictly-ish (handles "18:00" or "6:00 PM")
+
+                # Parse NZ-style date (DD/MM/YYYY)
+                d = dtparser.parse(d_raw, dayfirst=True).date()
+
+                # Parse time only (handles "18:00" or "6:00 PM")
                 t = dtparser.parse(t_raw).time()
+
+                # Combine into one datetime
                 start_dt = datetime.combine(d, t)
+
             else:
+                # --- FULL DATETIME PROVIDED ---
                 start_raw = str(row[cols["start_datetime"]]).strip()
-                start_dt = dtparser.parse(start_raw)
+                start_dt = parse_start_dt(start_raw)
+
         except Exception as e:
             raise ValueError(f"Could not parse date/time for game_id={game_key}: {e}")
 
